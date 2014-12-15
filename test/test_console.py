@@ -15,7 +15,7 @@ class TestConsoleState:
         """
         c = console.ConsoleState()
         f = self._add_request(c)
-        assert f in c._flow_list
+        assert f in c.flows
         assert c.get_focus() == (f, 0)
 
     def test_focus(self):
@@ -51,20 +51,20 @@ class TestConsoleState:
         assert c.get_focus() == (None, None)
 
     def _add_request(self, state):
-        r = tutils.treq()
-        return state.add_request(r)
+        f = tutils.tflow()
+        return state.add_flow(f)
 
     def _add_response(self, state):
         f = self._add_request(state)
-        r = tutils.tresp(f.request)
-        state.add_response(r)
+        f.response = tutils.tresp()
+        state.update_flow(f)
 
     def test_add_response(self):
         c = console.ConsoleState()
         f = self._add_request(c)
-        r = tutils.tresp(f.request)
+        f.response = tutils.tresp()
         c.focus = None
-        c.add_response(r)
+        c.update_flow(f)
 
     def test_focus_view(self):
         c = console.ConsoleState()

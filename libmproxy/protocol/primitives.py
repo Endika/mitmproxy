@@ -1,34 +1,22 @@
-from .. import stateobject, utils, version
-from ..proxy import ServerConnection, ClientConnection
+from __future__ import absolute_import
 import copy
+import uuid
+import netlib.tcp
+from .. import stateobject, utils, version
+from ..proxy.connection import ClientConnection, ServerConnection
 
 
-class BackreferenceMixin(object):
-    """
-    If an attribute from the _backrefattr tuple is set,
-    this mixin sets a reference back on the attribute object.
-    Example:
-        e = Error()
-        f = Flow()
-        f.error = e
-        assert f is e.flow
-    """
-    _backrefattr = tuple()
-
-    def __setattr__(self, key, value):
-        super(BackreferenceMixin, self).__setattr__(key, value)
-        if key in self._backrefattr and value is not None:
-            setattr(value, self._backrefname, self)
+KILL = 0  # const for killed requests
 
 
-class Error(stateobject.SimpleStateObject):
+class Error(stateobject.StateObject):
     """
         An Error.
 
-        This is distinct from an HTTP error response (say, a code 500), which
-        is represented by a normal Response object. This class is responsible
-        for indicating errors that fall outside of normal HTTP communications,
-        like interrupted connections, timeouts, protocol errors.
+        This is distinct from an protocol error response (say, a HTTP code 500),
+        which is represented by a normal HTTPResponse object. This class is
+        responsible for indicating errors that fall outside of normal protocol
+        communications, like interrupted connections, timeouts, protocol errors.
 
         Exposes the following attributes:
 
@@ -54,9 +42,11 @@ class Error(stateobject.SimpleStateObject):
         return self.msg
 
     @classmethod
-    def _from_state(cls, state):
-        f = cls(None)  # the default implementation assumes an empty constructor. Override accordingly.
-        f._load_state(state)
+    def from_state(cls, state):
+        # the default implementation assumes an empty constructor. Override
+        # accordingly.
+        f = cls(None)
+        f.load_state(state)
         return f
 
     def copy(self):
@@ -64,30 +54,35 @@ class Error(stateobject.SimpleStateObject):
         return c
 
 
-class Flow(stateobject.SimpleStateObject, BackreferenceMixin):
-    def __init__(self, conntype, client_conn, server_conn):
-        self.conntype = conntype
+class Flow(stateobject.StateObject):
+    """
+    A Flow is a collection of objects representing a single transaction.
+    This class is usually subclassed for each protocol, e.g. HTTPFlow.
+    """
+    def __init__(self, type, client_conn, server_conn, live=None):
+        self.type = type
+        self.id = str(uuid.uuid4())
         self.client_conn = client_conn
         """@type: ClientConnection"""
         self.server_conn = server_conn
         """@type: ServerConnection"""
+        self.live = live
+        """@type: LiveConnection"""
 
         self.error = None
         """@type: Error"""
         self._backup = None
 
-    _backrefattr = ("error",)
-    _backrefname = "flow"
-
     _stateobject_attributes = dict(
+        id=str,
         error=Error,
         client_conn=ClientConnection,
         server_conn=ServerConnection,
-        conntype=str
+        type=str
     )
 
-    def _get_state(self):
-        d = super(Flow, self)._get_state()
+    def get_state(self, short=False):
+        d = super(Flow, self).get_state(short)
         d.update(version=version.IVERSION)
         return d
 
@@ -109,7 +104,7 @@ class Flow(stateobject.SimpleStateObject, BackreferenceMixin):
             Has this Flow been modified?
         """
         if self._backup:
-            return self._backup != self._get_state()
+            return self._backup != self.get_state()
         else:
             return False
 
@@ -119,12 +114,132 @@ class Flow(stateobject.SimpleStateObject, BackreferenceMixin):
             call to .revert().
         """
         if not self._backup:
-            self._backup = self._get_state()
+            self._backup = self.get_state()
 
     def revert(self):
         """
             Revert to the last backed up state.
         """
         if self._backup:
-            self._load_state(self._backup)
+            self.load_state(self._backup)
             self._backup = None
+
+
+class ProtocolHandler(object):
+    """
+    A ProtocolHandler implements an application-layer protocol, e.g. HTTP.
+    See: libmproxy.protocol.http.HTTPHandler
+    """
+    def __init__(self, c):
+        self.c = c
+        """@type: libmproxy.proxy.server.ConnectionHandler"""
+        self.live = LiveConnection(c)
+        """@type: LiveConnection"""
+
+    def handle_messages(self):
+        """
+        This method gets called if a client connection has been made. Depending
+        on the proxy settings, a server connection might already exist as well.
+        """
+        raise NotImplementedError  # pragma: nocover
+
+    def handle_server_reconnect(self, state):
+        """
+        This method gets called if a server connection needs to reconnect and
+        there's a state associated with the server connection (e.g. a
+        previously-sent CONNECT request or a SOCKS proxy request). This method
+        gets called after the connection has been restablished but before SSL is
+        established.
+        """
+        raise NotImplementedError  # pragma: nocover
+
+    def handle_error(self, error):
+        """
+        This method gets called should there be an uncaught exception during the
+        connection. This might happen outside of handle_messages, e.g. if the
+        initial SSL handshake fails in transparent mode.
+        """
+        raise error  # pragma: nocover
+
+
+class LiveConnection(object):
+    """
+    This facade allows interested parties (FlowMaster, inline scripts) to
+    interface with a live connection, without exposing the internals
+    of the ConnectionHandler.
+    """
+    def __init__(self, c):
+        self.c = c
+        """@type: libmproxy.proxy.server.ConnectionHandler"""
+        self._backup_server_conn = None
+        """@type: libmproxy.proxy.connection.ServerConnection"""
+
+    def change_server(self, address, ssl=None, sni=None, force=False, persistent_change=False):
+        """
+        Change the server connection to the specified address.
+        @returns:
+        True, if a new connection has been established,
+        False, if an existing connection has been used
+        """
+        address = netlib.tcp.Address.wrap(address)
+
+        ssl_mismatch = (
+            ssl is not None and
+            (
+                ssl != self.c.server_conn.ssl_established
+                or
+                (sni is not None and sni != self.c.sni)
+            )
+        )
+        address_mismatch = (address != self.c.server_conn.address)
+
+        if persistent_change:
+            self._backup_server_conn = None
+
+        if ssl_mismatch or address_mismatch or force:
+
+            self.c.log(
+                "Change server connection: %s:%s -> %s:%s [persistent: %s]" % (
+                    self.c.server_conn.address.host,
+                    self.c.server_conn.address.port,
+                    address.host,
+                    address.port,
+                    persistent_change
+                ),
+                "debug"
+            )
+
+            if not self._backup_server_conn and not persistent_change:
+                self._backup_server_conn = self.c.server_conn
+                self.c.server_conn = None
+            else:
+                # This is at least the second temporary change. We can kill the
+                # current connection.
+                self.c.del_server_connection()
+
+            self.c.set_server_address(address)
+            self.c.establish_server_connection(ask=False)
+            if sni:
+                self.c.sni = sni
+            if ssl:
+                self.c.establish_ssl(server=True)
+            return True
+        return False
+
+    def restore_server(self):
+        # TODO: Similar to _backup_server_conn, introduce _cache_server_conn,
+        # which keeps the changed connection open This may be beneficial if a
+        # user is rewriting all requests from http to https or similar.
+        if not self._backup_server_conn:
+            return
+
+        self.c.log("Restore original server connection: %s:%s -> %s:%s" % (
+            self.c.server_conn.address.host,
+            self.c.server_conn.address.port,
+            self._backup_server_conn.address.host,
+            self._backup_server_conn.address.port
+        ), "debug")
+
+        self.c.del_server_connection()
+        self.c.server_conn = self._backup_server_conn
+        self._backup_server_conn = None

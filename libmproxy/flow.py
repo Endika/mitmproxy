@@ -1,20 +1,19 @@
 """
-    This module provides more sophisticated flow tracking. These match requests
-    with their responses, and provide filtering and interception facilities.
+    This module provides more sophisticated flow tracking and provides filtering and interception facilities.
 """
-import base64
-import hashlib, Cookie, cookielib, re, threading
-import os
-import flask
-import requests
-import tnetstring, filt, script
+from __future__ import absolute_import
+from abc import abstractmethod, ABCMeta
+import hashlib
+import Cookie
+import cookielib
+import re
 from netlib import odict, wsgi
-from .proxy import ClientConnection, ServerConnection  # FIXME: remove circular dependency
-import controller, version, protocol
-import app
-from .protocol import KILL
-from .protocol.http import HTTPResponse, CONTENT_MISSING
-from .proxy import RequestReplayThread
+import netlib.http
+from . import controller, protocol, tnetstring, filt, script, version
+from .onboarding import app
+from .protocol import http, handle
+from .proxy.config import HostMatcher
+import urlparse
 
 ODict = odict.ODict
 ODictCaseless = odict.ODictCaseless
@@ -29,17 +28,22 @@ class AppRegistry:
             Add a WSGI app to the registry, to be served for requests to the
             specified domain, on the specified port.
         """
-        self.apps[(domain, port)] = wsgi.WSGIAdaptor(app, domain, port, version.NAMEVERSION)
+        self.apps[(domain, port)] = wsgi.WSGIAdaptor(
+            app,
+            domain,
+            port,
+            version.NAMEVERSION
+        )
 
     def get(self, request):
         """
             Returns an WSGIAdaptor instance if request matches an app, or None.
         """
-        if (request.get_host(), request.get_port()) in self.apps:
-            return self.apps[(request.get_host(), request.get_port())]
+        if (request.host, request.port) in self.apps:
+            return self.apps[(request.host, request.port)]
         if "host" in request.headers:
             host = request.headers["host"][0]
-            return self.apps.get((host, request.get_port()), None)
+            return self.apps.get((host, request.port), None)
 
 
 class ReplaceHooks:
@@ -74,7 +78,8 @@ class ReplaceHooks:
 
     def get_specs(self):
         """
-            Retrieve the hook specifcations. Returns a list of (fpatt, rex, s) tuples.
+            Retrieve the hook specifcations. Returns a list of (fpatt, rex, s)
+            tuples.
         """
         return [i[:3] for i in self.lst]
 
@@ -121,7 +126,8 @@ class SetHeaders:
 
     def get_specs(self):
         """
-            Retrieve the hook specifcations. Returns a list of (fpatt, rex, s) tuples.
+            Retrieve the hook specifcations. Returns a list of (fpatt, rex, s)
+            tuples.
         """
         return [i[:3] for i in self.lst]
 
@@ -146,10 +152,25 @@ class SetHeaders:
                     f.request.headers.add(header, value)
 
 
+class StreamLargeBodies(object):
+    def __init__(self, max_size):
+        self.max_size = max_size
+
+    def run(self, flow, is_request):
+        r = flow.request if is_request else flow.response
+        code = flow.response.code if flow.response else None
+        expected_size = netlib.http.expected_http_body_size(
+            r.headers, is_request, flow.request.method, code
+        )
+        if not (0 <= expected_size <= self.max_size):
+            r.stream = True
+
+
 class ClientPlaybackState:
     def __init__(self, flows, exit):
         self.flows, self.exit = flows, exit
         self.current = None
+        self.testing = False  # Disables actual replay for testing.
 
     def count(self):
         return len(self.flows)
@@ -167,28 +188,25 @@ class ClientPlaybackState:
         if flow is self.current:
             self.current = None
 
-    def tick(self, master, testing=False):
-        """
-            testing: Disables actual replay for testing.
-        """
+    def tick(self, master):
         if self.flows and not self.current:
-            n = self.flows.pop(0)
-            n.request.reply = controller.DummyReply()
-            n.client_conn = None
-            self.current = master.handle_request(n.request)
-            if not testing and not self.current.response:
-                master.replay_request(self.current) # pragma: no cover
-            elif self.current.response:
-                master.handle_response(self.current.response)
+            self.current = self.flows.pop(0).copy()
+            if not self.testing:
+                master.replay_request(self.current)
+            else:
+                self.current.reply = controller.DummyReply()
+                master.handle_request(self.current)
+                if self.current.response:
+                    master.handle_response(self.current)
 
 
 class ServerPlaybackState:
-    def __init__(self, headers, flows, exit, nopop):
+    def __init__(self, headers, flows, exit, nopop, ignore_params, ignore_content):
         """
             headers: Case-insensitive list of request headers that should be
             included in request-response matching.
         """
-        self.headers, self.exit, self.nopop = headers, exit, nopop
+        self.headers, self.exit, self.nopop, self.ignore_params, self.ignore_content = headers, exit, nopop, ignore_params, ignore_content
         self.fmap = {}
         for i in flows:
             if i.response:
@@ -203,14 +221,30 @@ class ServerPlaybackState:
             Calculates a loose hash of the flow request.
         """
         r = flow.request
+
+        _, _, path, _, query, _ = urlparse.urlparse(r.url)
+        queriesArray = urlparse.parse_qsl(query)
+
+        filtered = []
+        ignore_params = self.ignore_params or []
+        for p in queriesArray:
+            if p[0] not in ignore_params:
+                filtered.append(p)
+
         key = [
             str(r.host),
             str(r.port),
             str(r.scheme),
             str(r.method),
-            str(r.path),
-            str(r.content),
-        ]
+            str(path),
+         ]
+        if not self.ignore_content:
+            key.append(str(r.content))
+
+        for p in filtered:
+            key.append(p[0])
+            key.append(p[1])
+
         if self.headers:
             hdrs = []
             for i in self.headers:
@@ -250,8 +284,8 @@ class StickyCookieState:
             Returns a (domain, port, path) tuple.
         """
         return (
-            m["domain"] or f.request.get_host(),
-            f.request.get_port(),
+            m["domain"] or f.request.host,
+            f.request.port,
             m["path"] or "/"
         )
 
@@ -269,7 +303,7 @@ class StickyCookieState:
             c = Cookie.SimpleCookie(str(i))
             m = c.values()[0]
             k = self.ckey(m, f)
-            if self.domain_match(f.request.get_host(), k[0]):
+            if self.domain_match(f.request.host, k[0]):
                 self.jar[self.ckey(m, f)] = m
 
     def handle_request(self, f):
@@ -277,8 +311,8 @@ class StickyCookieState:
         if f.match(self.flt):
             for i in self.jar.keys():
                 match = [
-                    self.domain_match(f.request.get_host(), i[0]),
-                    f.request.get_port() == i[1],
+                    self.domain_match(f.request.host, i[0]),
+                    f.request.port == i[1],
                     f.request.path.startswith(i[2])
                 ]
                 if all(match):
@@ -297,7 +331,7 @@ class StickyAuthState:
         self.hosts = {}
 
     def handle_request(self, f):
-        host = f.request.get_host()
+        host = f.request.host
         if "authorization" in f.request.headers:
             self.hosts[host] = f.request.headers["authorization"]
         elif f.match(self.flt):
@@ -305,81 +339,216 @@ class StickyAuthState:
                 f.request.headers["authorization"] = self.hosts[host]
 
 
-class State(object):
-    def __init__(self):
-        self._flow_list = []
-        self.view = []
+class FlowList(object):
+    __metaclass__ = ABCMeta
 
-        # These are compiled filt expressions:
-        self._limit = None
-        self.intercept = None
-        self._limit_txt = None
+    def __iter__(self):
+        return iter(self._list)
 
-    @property
-    def limit_txt(self):
-        return self._limit_txt
+    def __contains__(self, item):
+        return item in self._list
 
-    def flow_count(self):
-        return len(self._flow_list)
+    def __getitem__(self, item):
+        return self._list[item]
+
+    def __nonzero__(self):
+        return bool(self._list)
+
+    def __len__(self):
+        return len(self._list)
 
     def index(self, f):
-        return self._flow_list.index(f)
+        return self._list.index(f)
 
-    def active_flow_count(self):
+    @abstractmethod
+    def _add(self, f):
+        return
+
+    @abstractmethod
+    def _update(self, f):
+        return
+
+    @abstractmethod
+    def _remove(self, f):
+        return
+
+
+class FlowView(FlowList):
+    def __init__(self, store, filt=None):
+        self._list = []
+        if not filt:
+            filt = lambda flow: True
+        self._build(store, filt)
+
+        self.store = store
+        self.store.views.append(self)
+
+    def _close(self):
+        self.store.views.remove(self)
+
+    def _build(self, flows, filt=None):
+        if filt:
+            self.filt = filt
+        self._list = list(filter(self.filt, flows))
+
+    def _add(self, f):
+        if self.filt(f):
+            self._list.append(f)
+
+    def _update(self, f):
+        if f not in self._list:
+            self._add(f)
+        elif not self.filt(f):
+            self._remove(f)
+
+    def _remove(self, f):
+        if f in self._list:
+            self._list.remove(f)
+
+    def _recalculate(self, flows):
+        self._build(flows)
+
+
+class FlowStore(FlowList):
+    """
+    Responsible for handling flows in the state:
+    Keeps a list of all flows and provides views on them.
+    """
+    def __init__(self):
+        self._list = []
+        self._set = set()  # Used for O(1) lookups
+        self.views = []
+        self._recalculate_views()
+
+    def __contains__(self, f):
+        return f in self._set
+
+    def _add(self, f):
+        """
+        Adds a flow to the state.
+        The flow to add must not be present in the state.
+        """
+        self._list.append(f)
+        self._set.add(f)
+        for view in self.views:
+            view._add(f)
+
+    def _update(self, f):
+        """
+        Notifies the state that a flow has been updated.
+        The flow must be present in the state.
+        """
+        for view in self.views:
+            view._update(f)
+
+    def _remove(self, f):
+        """
+        Deletes a flow from the state.
+        The flow must be present in the state.
+        """
+        self._list.remove(f)
+        self._set.remove(f)
+        for view in self.views:
+            view._remove(f)
+
+    # Expensive bulk operations
+
+    def _extend(self, flows):
+        """
+        Adds a list of flows to the state.
+        The list of flows to add must not contain flows that are already in the state.
+        """
+        self._list.extend(flows)
+        self._set.update(flows)
+        self._recalculate_views()
+
+    def _clear(self):
+        self._list = []
+        self._set = set()
+        self._recalculate_views()
+
+    def _recalculate_views(self):
+        """
+        Expensive operation: Recalculate all the views after a bulk change.
+        """
+        for view in self.views:
+            view._recalculate(self)
+
+    # Utility functions.
+    # There are some common cases where we need to argue about all flows
+    # irrespective of filters on the view etc (i.e. on shutdown).
+
+    def active_count(self):
         c = 0
-        for i in self._flow_list:
+        for i in self._list:
             if not i.response and not i.error:
                 c += 1
         return c
 
-    def add_request(self, req):
+    # TODO: Should accept_all operate on views or on all flows?
+    def accept_all(self):
+        for f in self._list:
+            f.accept_intercept()
+
+    def kill_all(self, master):
+        for f in self._list:
+            f.kill(master)
+
+
+class State(object):
+    def __init__(self):
+        self.flows = FlowStore()
+        self.view = FlowView(self.flows, None)
+
+        # These are compiled filt expressions:
+        self.intercept = None
+
+    @property
+    def limit_txt(self):
+        return getattr(self.view.filt, "pattern", None)
+
+    def flow_count(self):
+        return len(self.flows)
+
+    # TODO: All functions regarding flows that don't cause side-effects should be moved into FlowStore.
+    def index(self, f):
+        return self.flows.index(f)
+
+    def active_flow_count(self):
+        return self.flows.active_count()
+
+    def add_flow(self, f):
         """
-            Add a request to the state. Returns the matching flow.
+            Add a request to the state.
         """
-        f = req.flow
-        self._flow_list.append(f)
-        if f.match(self._limit):
-            self.view.append(f)
+        self.flows._add(f)
         return f
 
-    def add_response(self, resp):
+    def update_flow(self, f):
         """
-            Add a response to the state. Returns the matching flow.
+            Add a response to the state.
         """
-        f = resp.flow
-        if not f:
-            return False
-        if f.match(self._limit) and not f in self.view:
-            self.view.append(f)
+        self.flows._update(f)
         return f
 
-    def add_error(self, err):
-        """
-            Add an error response to the state. Returns the matching flow, or
-            None if there isn't one.
-        """
-        f = err.flow
-        if not f:
-            return None
-        if f.match(self._limit) and not f in self.view:
-            self.view.append(f)
-        return f
+    def delete_flow(self, f):
+        self.flows._remove(f)
 
     def load_flows(self, flows):
-        self._flow_list.extend(flows)
-        self.recalculate_view()
+        self.flows._extend(flows)
 
     def set_limit(self, txt):
+        if txt == self.limit_txt:
+            return
         if txt:
             f = filt.parse(txt)
             if not f:
                 return "Invalid filter expression."
-            self._limit = f
-            self._limit_txt = txt
+            self.view._close()
+            self.view = FlowView(self.flows, f)
         else:
-            self._limit = None
-            self._limit_txt = None
-        self.recalculate_view()
+            self.view._close()
+            self.view = FlowView(self.flows, None)
 
     def set_intercept(self, txt):
         if txt:
@@ -387,37 +556,24 @@ class State(object):
             if not f:
                 return "Invalid filter expression."
             self.intercept = f
-            self.intercept_txt = txt
         else:
             self.intercept = None
-            self.intercept_txt = None
 
-    def recalculate_view(self):
-        if self._limit:
-            self.view = [i for i in self._flow_list if i.match(self._limit)]
-        else:
-            self.view = self._flow_list[:]
-
-    def delete_flow(self, f):
-        self._flow_list.remove(f)
-        if f in self.view:
-            self.view.remove(f)
-        return True
+    @property
+    def intercept_txt(self):
+        return getattr(self.intercept, "pattern", None)
 
     def clear(self):
-        for i in self._flow_list[:]:
-            self.delete_flow(i)
+        self.flows._clear()
 
     def accept_all(self):
-        for i in self._flow_list[:]:
-            i.accept_intercept()
+        self.flows.accept_all()
 
     def revert(self, f):
         f.revert()
 
     def killall(self, master):
-        for i in self._flow_list:
-            i.kill(master)
+        self.flows.kill_all(master)
 
 
 class FlowMaster(controller.Master):
@@ -438,57 +594,37 @@ class FlowMaster(controller.Master):
 
         self.anticache = False
         self.anticomp = False
+        self.stream_large_bodies = False
         self.refresh_server_playback = False
         self.replacehooks = ReplaceHooks()
         self.setheaders = SetHeaders()
+        self.replay_ignore_params = False
+        self.replay_ignore_content = None
+
 
         self.stream = None
         self.apps = AppRegistry()
 
-    def start_app(self, host, port, external):
-        if not external:
-            self.apps.add(
-                app.mapp,
-                host,
-                port
-            )
-        else:
-            @app.mapp.before_request
-            def patch_environ(*args, **kwargs):
-                flask.request.environ["mitmproxy.master"] = self
-
-            # the only absurd way to shut down a flask/werkzeug server.
-            # http://flask.pocoo.org/snippets/67/
-            shutdown_secret = base64.b32encode(os.urandom(30))
-
-            @app.mapp.route('/shutdown/<secret>')
-            def shutdown(secret):
-                if secret == shutdown_secret:
-                    flask.request.environ.get('werkzeug.server.shutdown')()
-
-            # Workaround: Monkey-patch shutdown function to stop the app.
-            # Improve this when we switch werkzeugs http server for something useful.
-            _shutdown = self.shutdown
-            def _shutdownwrap():
-                _shutdown()
-                requests.get("http://%s:%s/shutdown/%s" % (host, port, shutdown_secret))
-            self.shutdown = _shutdownwrap
-
-            threading.Thread(target=app.mapp.run, kwargs={
-                "use_reloader": False,
-                "host": host,
-                "port": port}).start()
+    def start_app(self, host, port):
+        self.apps.add(
+            app.mapp,
+            host,
+            port
+        )
 
     def add_event(self, e, level="info"):
         """
-            level: info, error
+            level: debug, info, error
         """
         pass
 
     def unload_scripts(self):
         for s in self.scripts[:]:
-            s.unload()
-            self.scripts.remove(s)
+            self.unload_script(s)
+
+    def unload_script(self, script):
+        script.unload()
+        self.scripts.remove(script)
 
     def load_script(self, command):
         """
@@ -512,6 +648,18 @@ class FlowMaster(controller.Master):
         for script in self.scripts:
             self.run_single_script_hook(script, name, *args, **kwargs)
 
+    def get_ignore_filter(self):
+        return self.server.config.check_ignore.patterns
+
+    def set_ignore_filter(self, host_patterns):
+        self.server.config.check_ignore = HostMatcher(host_patterns)
+
+    def get_tcp_filter(self):
+        return self.server.config.check_tcp.patterns
+
+    def set_tcp_filter(self, host_patterns):
+        self.server.config.check_tcp = HostMatcher(host_patterns)
+
     def set_stickycookie(self, txt):
         if txt:
             flt = filt.parse(txt)
@@ -522,6 +670,12 @@ class FlowMaster(controller.Master):
         else:
             self.stickycookie_state = None
             self.stickycookie_txt = None
+
+    def set_stream_large_bodies(self, max_size):
+        if max_size is not None:
+            self.stream_large_bodies = StreamLargeBodies(max_size)
+        else:
+            self.stream_large_bodies = False
 
     def set_stickyauth(self, txt):
         if txt:
@@ -543,12 +697,14 @@ class FlowMaster(controller.Master):
     def stop_client_playback(self):
         self.client_playback = None
 
-    def start_server_playback(self, flows, kill, headers, exit, nopop):
+    def start_server_playback(self, flows, kill, headers, exit, nopop, ignore_params, ignore_content):
         """
             flows: List of flows.
             kill: Boolean, should we kill requests not part of the replay?
+            ignore_params: list of parameters to ignore in server replay
+            ignore_content: true if request content should be ignored in server replay
         """
-        self.server_playback = ServerPlaybackState(headers, flows, exit, nopop)
+        self.server_playback = ServerPlaybackState(headers, flows, exit, nopop, ignore_params, ignore_content)
         self.kill_nonreplay = kill
 
     def stop_server_playback(self):
@@ -565,17 +721,17 @@ class FlowMaster(controller.Master):
             rflow = self.server_playback.next_flow(flow)
             if not rflow:
                 return None
-            response = HTTPResponse._from_state(rflow.response._get_state())
+            response = http.HTTPResponse.from_state(rflow.response.get_state())
             response.is_replay = True
             if self.refresh_server_playback:
                 response.refresh()
-            flow.request.reply(response)
+            flow.reply(response)
             if self.server_playback.count() == 0:
                 self.stop_server_playback()
             return True
         return None
 
-    def tick(self, q):
+    def tick(self, q, timeout):
         if self.client_playback:
             e = [
                 self.client_playback.done(),
@@ -586,7 +742,7 @@ class FlowMaster(controller.Master):
                 self.shutdown()
             self.client_playback.tick(self)
 
-        return controller.Master.tick(self, q)
+        return controller.Master.tick(self, q, timeout)
 
     def duplicate_flow(self, f):
         return self.load_flow(f.copy())
@@ -595,16 +751,20 @@ class FlowMaster(controller.Master):
         """
             Loads a flow, and returns a new flow object.
         """
+
+        if self.server and self.server.config.mode == "reverse":
+            f.request.host, f.request.port = self.server.config.mode.dst[2:]
+            f.request.scheme = "https" if self.server.config.mode.dst[1] else "http"
+
+        f.reply = controller.DummyReply()
         if f.request:
-            f.request.reply = controller.DummyReply()
-            fr = self.handle_request(f.request)
+            self.handle_request(f)
         if f.response:
-            f.response.reply = controller.DummyReply()
-            self.handle_response(f.response)
+            self.handle_responseheaders(f)
+            self.handle_response(f)
         if f.error:
-            f.error.reply = controller.DummyReply()
-            self.handle_error(f.error)
-        return fr
+            self.handle_error(f)
+        return f
 
     def load_flows(self, fr):
         """
@@ -630,7 +790,7 @@ class FlowMaster(controller.Master):
                 if self.kill_nonreplay:
                     f.kill(self)
                 else:
-                    f.request.reply()
+                    f.reply()
 
     def process_new_response(self, f):
         if self.stickycookie_state:
@@ -640,9 +800,11 @@ class FlowMaster(controller.Master):
         """
             Returns None if successful, or error message if not.
         """
+        if f.live:
+            return "Can't replay request which is still live..."
         if f.intercepting:
             return "Can't replay while intercepting..."
-        if f.request.content == CONTENT_MISSING:
+        if f.request.content == http.CONTENT_MISSING:
             return "Can't replay request with missing content..."
         if f.request:
             f.request.is_replay = True
@@ -651,14 +813,19 @@ class FlowMaster(controller.Master):
             f.response = None
             f.error = None
             self.process_new_request(f)
-            rt = RequestReplayThread(
-                    self.server.config,
-                    f,
-                    self.masterq,
-                )
-            rt.start() # pragma: no cover
+            rt = http.RequestReplayThread(
+                self.server.config,
+                f,
+                self.masterq,
+                self.should_exit
+            )
+            rt.start()  # pragma: no cover
             if block:
                 rt.join()
+
+    def handle_log(self, l):
+        self.add_event(l.msg, l.level)
+        l.reply()
 
     def handle_clientconnect(self, cc):
         self.run_script_hook("clientconnect", cc)
@@ -668,60 +835,69 @@ class FlowMaster(controller.Master):
         self.run_script_hook("clientdisconnect", r)
         r.reply()
 
-    def handle_serverconnection(self, sc):
-        # To unify the mitmproxy script API, we call the script hook
-        # "serverconnect" rather than "serverconnection".  As things are handled
-        # differently in libmproxy (ClientConnect + ClientDisconnect vs
-        # ServerConnection class), there is no "serverdisonnect" event at the
-        # moment.
+    def handle_serverconnect(self, sc):
         self.run_script_hook("serverconnect", sc)
         sc.reply()
 
-    def handle_error(self, r):
-        f = self.state.add_error(r)
-        if f:
-            self.run_script_hook("error", f)
+    def handle_error(self, f):
+        self.state.update_flow(f)
+        self.run_script_hook("error", f)
         if self.client_playback:
             self.client_playback.clear(f)
-        r.reply()
+        f.reply()
         return f
 
-    def handle_request(self, r):
-        if r.flow.client_conn and r.flow.client_conn.wfile:
-            app = self.apps.get(r)
+    def handle_request(self, f):
+        if f.live:
+            app = self.apps.get(f.request)
             if app:
-                err = app.serve(r, r.flow.client_conn.wfile, **{"mitmproxy.master": self})
+                err = app.serve(
+                    f,
+                    f.client_conn.wfile,
+                    **{"mitmproxy.master": self}
+                )
                 if err:
                     self.add_event("Error in wsgi app. %s"%err, "error")
-                r.reply(KILL)
+                f.reply(protocol.KILL)
                 return
-        f = self.state.add_request(r)
+        if f not in self.state.flows:  # don't add again on replay
+            self.state.add_flow(f)
         self.replacehooks.run(f)
         self.setheaders.run(f)
         self.run_script_hook("request", f)
         self.process_new_request(f)
         return f
 
-    def handle_response(self, r):
-        f = self.state.add_response(r)
-        if f:
-            self.replacehooks.run(f)
-            self.setheaders.run(f)
-            self.run_script_hook("response", f)
-            if self.client_playback:
-                self.client_playback.clear(f)
-            self.process_new_response(f)
-            if self.stream:
-                self.stream.add(f)
-        else:
-            r.reply()
+    def handle_responseheaders(self, f):
+        self.run_script_hook("responseheaders", f)
+
+        try:
+            if self.stream_large_bodies:
+                self.stream_large_bodies.run(f, False)
+        except netlib.http.HttpError:
+            f.reply(protocol.KILL)
+            return
+
+        f.reply()
+        return f
+
+    def handle_response(self, f):
+        self.state.update_flow(f)
+        self.replacehooks.run(f)
+        self.setheaders.run(f)
+        self.run_script_hook("response", f)
+        if self.client_playback:
+            self.client_playback.clear(f)
+        self.process_new_response(f)
+        if self.stream:
+            self.stream.add(f)
         return f
 
     def shutdown(self):
         self.unload_scripts()
         controller.Master.shutdown(self)
         if self.stream:
-            for i in self.state._flow_list:
+            for i in self.state.flows:
                 if not i.response:
                     self.stream.add(i)
             self.stop_stream()
@@ -734,13 +910,12 @@ class FlowMaster(controller.Master):
         self.stream = None
 
 
-
 class FlowWriter:
     def __init__(self, fo):
         self.fo = fo
 
     def add(self, flow):
-        d = flow._get_state()
+        d = flow.get_state()
         tnetstring.dump(d, self.fo)
 
 
@@ -766,7 +941,7 @@ class FlowReader:
                     v = ".".join(str(i) for i in data["version"])
                     raise FlowReadError("Incompatible serialized data version: %s"%v)
                 off = self.fo.tell()
-                yield protocol.protocols[data["conntype"]]["flow"]._from_state(data)
+                yield handle.protocols[data["type"]]["flow"].from_state(data)
         except ValueError, v:
             # Error is due to EOF
             if self.fo.tell() == off and self.fo.read() == '':
@@ -782,6 +957,5 @@ class FilteredFlowWriter:
     def add(self, f):
         if self.filt and not f.match(self.filt):
             return
-        d = f._get_state()
+        d = f.get_state()
         tnetstring.dump(d, self.fo)
-

@@ -1,7 +1,10 @@
-import os, shutil, tempfile
+from cStringIO import StringIO
+import os, shutil, tempfile, argparse
 from contextlib import contextmanager
-from libmproxy import flow, utils, controller, proxy
+import sys
+from libmproxy import flow, utils, controller
 from libmproxy.protocol import http
+from libmproxy.proxy.connection import ClientConnection, ServerConnection
 import mock_urwid
 from libmproxy.console.flowview import FlowView
 from libmproxy.console import ConsoleState
@@ -20,8 +23,39 @@ def SkipWindows(fn):
         return fn
 
 
+def tflow(client_conn=True, server_conn=True, req=True, resp=None, err=None):
+    """
+    @type client_conn: bool | None | libmproxy.proxy.connection.ClientConnection
+    @type server_conn: bool | None | libmproxy.proxy.connection.ServerConnection
+    @type req:         bool | None | libmproxy.protocol.http.HTTPRequest
+    @type resp:        bool | None | libmproxy.protocol.http.HTTPResponse
+    @type err:         bool | None | libmproxy.protocol.primitives.Error
+    @return:           bool | None | libmproxy.protocol.http.HTTPFlow
+    """
+    if client_conn is True:
+        client_conn = tclient_conn()
+    if server_conn is True:
+        server_conn = tserver_conn()
+    if req is True:
+        req = treq()
+    if resp is True:
+        resp = tresp()
+    if err is True:
+        err = terr()
+
+    f = http.HTTPFlow(client_conn, server_conn)
+    f.request = req
+    f.response = resp
+    f.error = err
+    f.reply = controller.DummyReply()
+    return f
+
+
 def tclient_conn():
-    c = proxy.ClientConnection._from_state(dict(
+    """
+    @return: libmproxy.proxy.connection.ClientConnection
+    """
+    c = ClientConnection.from_state(dict(
         address=dict(address=("address", 22), use_ipv6=True),
         clientcert=None
     ))
@@ -30,8 +64,12 @@ def tclient_conn():
 
 
 def tserver_conn():
-    c = proxy.ServerConnection._from_state(dict(
+    """
+    @return: libmproxy.proxy.connection.ServerConnection
+    """
+    c = ServerConnection.from_state(dict(
         address=dict(address=("address", 22), use_ipv6=True),
+        state=[],
         source_address=dict(address=("address", 22), use_ipv6=True),
         cert=None
     ))
@@ -39,74 +77,46 @@ def tserver_conn():
     return c
 
 
-def treq_absolute(conn=None, content="content"):
-    r = treq(conn, content)
+def treq(content="content", scheme="http", host="address", port=22):
+    """
+    @return: libmproxy.protocol.http.HTTPRequest
+    """
+    headers = flow.ODictCaseless()
+    headers["header"] = ["qvalue"]
+    req = http.HTTPRequest("relative", "GET", scheme, host, port, "/path", (1, 1), headers, content,
+                                 None, None, None)
+    return req
+
+def treq_absolute(content="content"):
+    """
+    @return: libmproxy.protocol.http.HTTPRequest
+    """
+    r = treq(content)
     r.form_in = r.form_out = "absolute"
     r.host = "address"
     r.port = 22
     r.scheme = "http"
     return r
 
-def treq(conn=None, content="content"):
-    if not conn:
-        conn = tclient_conn()
-    server_conn = tserver_conn()
-    headers = flow.ODictCaseless()
-    headers["header"] = ["qvalue"]
 
-    f = http.HTTPFlow(conn, server_conn)
-    f.request = http.HTTPRequest("relative", "GET", None, None, None, "/path", (1, 1), headers, content,
-                                 None, None, None)
-    f.request.reply = controller.DummyReply()
-    return f.request
-
-
-def tresp(req=None, content="message"):
-    if not req:
-        req = treq()
-    f = req.flow
+def tresp(content="message"):
+    """
+    @return: libmproxy.protocol.http.HTTPResponse
+    """
 
     headers = flow.ODictCaseless()
     headers["header_response"] = ["svalue"]
-    cert = certutils.SSLCert.from_der(file(test_data.path("data/dercert"), "rb").read())
-    f.server_conn = proxy.ServerConnection._from_state(dict(
-        address=dict(address=("address", 22), use_ipv6=True),
-        source_address=None,
-        cert=cert.to_pem()))
-    f.response = http.HTTPResponse((1, 1), 200, "OK", headers, content, time(), time())
-    f.response.reply = controller.DummyReply()
-    return f.response
+
+    resp = http.HTTPResponse((1, 1), 200, "OK", headers, content, time(), time())
+    return resp
 
 
-def terr(req=None):
-    if not req:
-        req = treq()
-    f = req.flow
-    f.error = Error("error")
-    f.error.reply = controller.DummyReply()
-    return f.error
-
-def tflow_noreq():
-    f = tflow()
-    f.request = None
-    return f
-
-def tflow(req=None):
-    if not req:
-        req = treq()
-    return req.flow
-
-
-def tflow_full():
-    f = tflow()
-    f.response = tresp(f.request)
-    return f
-
-
-def tflow_err():
-    f = tflow()
-    f.error = terr(f.request)
-    return f
+def terr(content="error"):
+    """
+    @return: libmproxy.protocol.primitives.Error
+    """
+    err = Error(content)
+    return err
 
 def tflowview(request_contents=None):
     m = Mock()
@@ -114,8 +124,7 @@ def tflowview(request_contents=None):
     if request_contents == None:
         flow = tflow()
     else:
-        req = treq(None, request_contents)
-        flow = tflow(req)
+        flow = tflow(req=treq(request_contents))
 
     fv = FlowView(m, cs, flow)
     return fv
@@ -133,6 +142,15 @@ def tmpdir(*args, **kwargs):
 
     os.chdir(orig_workdir)
     shutil.rmtree(temp_workdir)
+
+
+class MockParser(argparse.ArgumentParser):
+    """
+    argparse.ArgumentParser sys.exits() by default.
+    Make it more testable by throwing an exception instead.
+    """
+    def error(self, message):
+        raise Exception(message)
 
 
 def raises(exc, obj, *args, **kwargs):
@@ -172,5 +190,13 @@ def raises(exc, obj, *args, **kwargs):
                     )
                 )
     raise AssertionError("No exception raised.")
+
+
+@contextmanager
+def capture_stderr(command, *args, **kwargs):
+    out, sys.stderr = sys.stderr, StringIO()
+    command(*args, **kwargs)
+    yield sys.stderr.getvalue()
+    sys.stderr = out
 
 test_data = utils.Data(__name__)

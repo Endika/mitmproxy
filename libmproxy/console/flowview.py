@@ -1,7 +1,9 @@
+from __future__ import absolute_import
 import os, sys, copy
 import urwid
-import common, grideditor, contentview
+from . import common, grideditor, contentview
 from .. import utils, flow, controller
+from ..protocol.http import HTTPResponse, CONTENT_MISSING
 
 
 class SearchError(Exception): pass
@@ -150,8 +152,8 @@ class FlowView(common.WWrap):
         return (description, text_objects)
 
     def cont_view_handle_missing(self, conn, viewmode):
-            if conn.content == flow.CONTENT_MISSING:
-                msg, body = "", [urwid.Text([("error", "[content missing]")])], 0
+            if conn.content == CONTENT_MISSING:
+                msg, body = "", [urwid.Text([("error", "[content missing]")])]
             else:
                 msg, body = self.content_view(viewmode, conn)
 
@@ -174,12 +176,9 @@ class FlowView(common.WWrap):
                 key = "header",
                 val = "text"
             )
-        if conn.content is not None:
-            override = self.override_get()
-            viewmode = self.viewmode_get(override)
-            msg, body = self.cont_view_handle_missing(conn, viewmode)
-        elif conn.content == flow.CONTENT_MISSING:
-            pass
+        override = self.override_get()
+        viewmode = self.viewmode_get(override)
+        msg, body = self.cont_view_handle_missing(conn, viewmode)
         return headers, msg, body
 
     def conn_text_merge(self, headers, msg, body):
@@ -231,7 +230,7 @@ class FlowView(common.WWrap):
     def wrap_body(self, active, body):
         parts = []
 
-        if self.flow.intercepting and not self.flow.request.reply.acked:
+        if self.flow.intercepting and not self.flow.reply.acked and not self.flow.response:
             qt = "Request intercepted"
         else:
             qt = "Request"
@@ -240,7 +239,7 @@ class FlowView(common.WWrap):
         else:
             parts.append(self._tab(qt, "heading_inactive"))
 
-        if self.flow.intercepting and self.flow.response and not self.flow.response.reply.acked:
+        if self.flow.intercepting and not self.flow.reply.acked and self.flow.response:
             st = "Response intercepted"
         else:
             st = "Response"
@@ -305,9 +304,11 @@ class FlowView(common.WWrap):
             searching for and handles all the logic surrounding that.
         """
 
-        if search_string == "":
+        if not search_string:
             search_string = self.state.get_flow_setting(self.flow,
                     "last_search_string")
+            if not search_string:
+                return
 
         if self.state.view_flow_mode == common.VIEW_FLOW_REQUEST:
             text = self.flow.request
@@ -524,7 +525,9 @@ class FlowView(common.WWrap):
 
     def set_url(self, url):
         request = self.flow.request
-        if not request.set_url(str(url)):
+        try:
+            request.url = str(url)
+        except ValueError:
             return "Invalid URL."
         self.master.refresh_flow(self.flow)
 
@@ -570,10 +573,9 @@ class FlowView(common.WWrap):
             conn = self.flow.request
         else:
             if not self.flow.response:
-                self.flow.response = flow.Response(
-                    self.flow.request,
+                self.flow.response = HTTPResponse(
                     self.flow.request.httpversion,
-                    200, "OK", flow.ODictCaseless(), "", None
+                    200, "OK", flow.ODictCaseless(), ""
                 )
                 self.flow.response.reply = controller.DummyReply()
             conn = self.flow.response
@@ -604,7 +606,7 @@ class FlowView(common.WWrap):
         elif part == "q":
             self.master.view_grideditor(grideditor.QueryEditor(self.master, conn.get_query().lst, self.set_query, conn))
         elif part == "u" and self.state.view_flow_mode == common.VIEW_FLOW_REQUEST:
-            self.master.prompt_edit("URL", conn.get_url(), self.set_url)
+            self.master.prompt_edit("URL", conn.url, self.set_url)
         elif part == "m" and self.state.view_flow_mode == common.VIEW_FLOW_REQUEST:
             self.master.prompt_onekey("Method", self.method_options, self.edit_method)
         elif part == "c" and self.state.view_flow_mode == common.VIEW_FLOW_RESPONSE:
@@ -643,7 +645,7 @@ class FlowView(common.WWrap):
 
     def delete_body(self, t):
         if t == "m":
-            val = flow.CONTENT_MISSING
+            val = CONTENT_MISSING
         else:
             val = None
         if self.state.view_flow_mode == common.VIEW_FLOW_REQUEST:
@@ -746,7 +748,7 @@ class FlowView(common.WWrap):
             self.master.statusbar.message("")
         elif key == "m":
             p = list(contentview.view_prompts)
-            p.insert(0, ("clear", "c"))
+            p.insert(0, ("Clear", "C"))
             self.master.prompt_onekey(
                 "Display mode",
                 p,
