@@ -1,28 +1,56 @@
 {
-  "name": "mitmproxy",
-  "private": true,
-  "devDependencies": {
-    "bower": "",
-    "bower-installer": "",
-    "clean-css": "",
-    "gulp": "",
-    "gulp-concat": "",
-    "gulp-jshint": "",
-    "gulp-less": "",
-    "gulp-livereload": "",
-    "gulp-minify-css": "",
-    "gulp-notify": "",
-    "gulp-peg": "",
-    "gulp-plumber": "",
-    "gulp-qunit": "",
-    "gulp-react": "",
-    "gulp-rename": "",
-    "gulp-sourcemaps": "",
-    "gulp-uglify": "",
-    "gulp-util": "",
-    "jshint-stylish": "",
-    "merge-stream": "",
-    "react": "",
-    "react-tools": ""
-  }
+    "name": "mitmproxy",
+    "private": true,
+    "scripts": {
+        "test": "jest ./src/js"
+    },
+    "jest": {
+        "testPathDirs": [
+            "./src/js"
+        ],
+        "testPathIgnorePatterns": [
+            "/node_modules/",
+            "testutils.js"
+        ],
+        "testDirectoryName": "tests"
+    },
+    "dependencies": {
+        "jquery": "",
+        "lodash": "",
+        "react": "",
+        "react-router": "",
+        "bootstrap": "",
+        "flux": ""
+    },
+    "devDependencies": {
+        "bower": "",
+        "browserify": "=8.0.1",
+        "gulp": "",
+        "gulp-concat": "",
+        "gulp-connect": "",
+        "gulp-jshint": "",
+        "gulp-less": "",
+        "gulp-livereload": "",
+        "gulp-minify-css": "",
+        "gulp-notify": "",
+        "gulp-plumber": "",
+        "gulp-react": "",
+        "gulp-rename": "",
+        "gulp-replace": "",
+        "gulp-rev": "",
+        "gulp-sourcemaps": "",
+        "gulp-uglify": "",
+        "gulp-util": "",
+        "jest-cli": "^0.1.18",
+        "jshint-stylish": "",
+        "lodash": "",
+        "map-stream": "",
+        "react": "",
+        "react-tools": "",
+        "reactify": "",
+        "vinyl-buffer": "",
+        "vinyl-source-stream": "",
+        "vinyl-transform": "",
+        "gulp-peg": ""
+    }
 }

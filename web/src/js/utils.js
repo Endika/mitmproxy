@@ -1,80 +1,5 @@
-// http://blog.vjeux.com/2013/javascript/scroll-position-with-react.html (also contains inverse example)
-var AutoScrollMixin = {
-    componentWillUpdate: function () {
-        var node = this.getDOMNode();
-        this._shouldScrollBottom = (
-            node.scrollTop !== 0 &&
-            node.scrollTop + node.clientHeight === node.scrollHeight
-        );
-    },
-    componentDidUpdate: function () {
-        if (this._shouldScrollBottom) {
-            var node = this.getDOMNode();
-            node.scrollTop = node.scrollHeight;
-        }
-    },
-};
+var $ = require("jquery");
 
-
-var StickyHeadMixin = {
-    adjustHead: function () {
-        // Abusing CSS transforms to set the element
-        // referenced as head into some kind of position:sticky.
-        var head = this.refs.head.getDOMNode();
-        head.style.transform = "translate(0," + this.getDOMNode().scrollTop + "px)";
-    }
-};
-
-
-var Navigation = _.extend({}, ReactRouter.Navigation, {
-    setQuery: function (dict) {
-        var q = this.context.getCurrentQuery();
-        for(var i in dict){
-            if(dict.hasOwnProperty(i)){
-                q[i] = dict[i] || undefined; //falsey values shall be removed.
-            }
-        }
-        q._ = "_"; // workaround for https://github.com/rackt/react-router/pull/599
-        this.replaceWith(this.context.getCurrentPath(), this.context.getCurrentParams(), q);
-    },
-    replaceWith: function(routeNameOrPath, params, query) {
-        if(routeNameOrPath === undefined){
-            routeNameOrPath = this.context.getCurrentPath();
-        }
-        if(params === undefined){
-            params = this.context.getCurrentParams();
-        }
-        if(query === undefined){
-            query = this.context.getCurrentQuery();
-        }
-        ReactRouter.Navigation.replaceWith.call(this, routeNameOrPath, params, query);
-    }
-});
-_.extend(Navigation.contextTypes, ReactRouter.State.contextTypes);
-
-var State = _.extend({}, ReactRouter.State, {
-    getInitialState: function () {
-        this._query = this.context.getCurrentQuery();
-        this._queryWatches = [];
-        return null;
-    },
-    onQueryChange: function (key, callback) {
-        this._queryWatches.push({
-            key: key,
-            callback: callback
-        });
-    },
-    componentWillReceiveProps: function (nextProps, nextState) {
-        var q = this.context.getCurrentQuery();
-        for (var i = 0; i < this._queryWatches.length; i++) {
-            var watch = this._queryWatches[i];
-            if (this._query[watch.key] !== q[watch.key]) {
-                watch.callback(this._query[watch.key], q[watch.key], watch.key);
-            }
-        }
-        this._query = q;
-    }
-});
 
 var Key = {
     UP: 38,
@@ -90,22 +15,28 @@ var Key = {
     TAB: 9,
     SPACE: 32,
     BACKSPACE: 8,
-    J: 74,
-    K: 75,
-    H: 72,
-    L: 76
 };
+// Add A-Z
+for (var i = 65; i <= 90; i++) {
+    Key[String.fromCharCode(i)] = i;
+}
 
 
 var formatSize = function (bytes) {
-    var size = bytes;
-    var prefix = ["B", "KB", "MB", "GB", "TB"];
-    var i = 0;
-    while (Math.abs(size) >= 1024 && i < prefix.length - 1) {
-        i++;
-        size = size / 1024;
+    if (bytes === 0)
+        return "0";
+    var prefix = ["b", "kb", "mb", "gb", "tb"];
+    for (var i = 0; i < prefix.length; i++){
+        if (Math.pow(1024, i + 1) > bytes){
+            break;
+        }
     }
-    return (Math.floor(size * 100) / 100.0).toFixed(2) + prefix[i];
+    var precision;
+    if (bytes%Math.pow(1024, i) === 0)
+        precision = 0;
+    else
+        precision = 1;
+    return (bytes/Math.pow(1024, i)).toFixed(precision) + prefix[i];
 };
 
 
@@ -128,32 +59,33 @@ var formatTimeStamp = function (seconds) {
 };
 
 
-function EventEmitter() {
-    this.listeners = {};
+function getCookie(name) {
+    var r = document.cookie.match("\\b" + name + "=([^;]*)\\b");
+    return r ? r[1] : undefined;
 }
-EventEmitter.prototype.emit = function (event) {
-    if (!(event in this.listeners)) {
-        return;
-    }
-    var args = Array.prototype.slice.call(arguments, 1);
-    this.listeners[event].forEach(function (listener) {
-        listener.apply(this, args);
-    }.bind(this));
-};
-EventEmitter.prototype.addListener = function (events, f) {
-    events.split(" ").forEach(function (event) {
-        this.listeners[event] = this.listeners[event] || [];
-        this.listeners[event].push(f);
-    }.bind(this));
-};
-EventEmitter.prototype.removeListener = function (events, f) {
-    if (!(events in this.listeners)) {
-        return false;
-    }
-    events.split(" ").forEach(function (event) {
-        var index = this.listeners[event].indexOf(f);
-        if (index >= 0) {
-            this.listeners[event].splice(index, 1);
+var xsrf = $.param({_xsrf: getCookie("_xsrf")});
+
+//Tornado XSRF Protection.
+$.ajaxPrefilter(function (options) {
+    if (["post", "put", "delete"].indexOf(options.type.toLowerCase()) >= 0 && options.url[0] === "/") {
+        if (options.data) {
+            options.data += ("&" + xsrf);
+        } else {
+            options.data = xsrf;
         }
-    }.bind(this));
+    }
+});
+// Log AJAX Errors
+$(document).ajaxError(function (event, jqXHR, ajaxSettings, thrownError) {
+    var message = jqXHR.responseText;
+    console.error(message, arguments);
+    EventLogActions.add_event(thrownError + ": " + message);
+    window.alert(message);
+});
+
+module.exports = {
+    formatSize: formatSize,
+    formatTimeDelta: formatTimeDelta,
+    formatTimeStamp: formatTimeStamp,
+    Key: Key
 };

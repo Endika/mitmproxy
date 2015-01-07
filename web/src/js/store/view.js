@@ -1,3 +1,10 @@
+
+var EventEmitter = require('events').EventEmitter;
+var _ = require("lodash");
+
+
+var utils = require("../utils.js");
+
 function SortByStoreOrder(elem) {
     return this.store.index(elem.id);
 }
@@ -32,10 +39,10 @@ _.extend(StoreView.prototype, EventEmitter.prototype, {
         this.store.removeListener("update", this.update);
         this.store.removeListener("remove", this.remove);
         this.store.removeListener("recalculate", this.recalculate);
-    },
-    recalculate: function (filt, sortfun) {
+        },
+        recalculate: function (filt, sortfun) {
         if (filt) {
-            this.filt = filt;
+            this.filt = filt.bind(this);
         }
         if (sortfun) {
             this.sortfun = sortfun.bind(this);
@@ -97,3 +104,7 @@ _.extend(StoreView.prototype, EventEmitter.prototype, {
         }
     }
 });
+
+module.exports = {
+    StoreView: StoreView
+};

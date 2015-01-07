@@ -1,3 +1,5 @@
+var $ = require("jquery");
+
 var ActionTypes = {
     // Connection
     CONNECTION_OPEN: "connection_open",
@@ -38,14 +40,20 @@ var ConnectionActions = {
 var SettingsActions = {
     update: function (settings) {
 
-        //TODO: Update server.
+        $.ajax({
+            type: "PUT",
+            url: "/settings",
+            data: settings
+        });
 
+        /*
         //Facebook Flux: We do an optimistic update on the client already.
         AppDispatcher.dispatchViewAction({
             type: ActionTypes.SETTINGS_STORE,
             cmd: StoreCmds.UPDATE,
             data: settings
         });
+        */
     }
 };
 
@@ -64,7 +72,49 @@ var EventLogActions = {
     }
 };
 
+var FlowActions = {
+    accept: function (flow) {
+        $.post("/flows/" + flow.id + "/accept");
+    },
+    accept_all: function(){
+        $.post("/flows/accept");
+    },
+    "delete": function(flow){
+        $.ajax({
+            type:"DELETE",
+            url: "/flows/" + flow.id
+        });
+    },
+    duplicate: function(flow){
+        $.post("/flows/" + flow.id + "/duplicate");
+    },
+    replay: function(flow){
+        $.post("/flows/" + flow.id + "/replay");
+    },
+    revert: function(flow){
+        $.post("/flows/" + flow.id + "/revert");
+    },
+    update: function (flow) {
+        AppDispatcher.dispatchViewAction({
+            type: ActionTypes.FLOW_STORE,
+            cmd: StoreCmds.UPDATE,
+            data: flow
+        });
+    },
+    clear: function(){
+        $.post("/clear");
+    }
+};
+
 Query = {
     FILTER: "f",
-    HIGHLIGHT: "h"
+    HIGHLIGHT: "h",
+    SHOW_EVENTLOG: "e"
+};
+
+module.exports = {
+    ActionTypes: ActionTypes,
+    ConnectionActions: ConnectionActions,
+    FlowActions: FlowActions,
+    StoreCmds: StoreCmds
 };

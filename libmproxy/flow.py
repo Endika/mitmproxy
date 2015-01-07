@@ -6,6 +6,7 @@ from abc import abstractmethod, ABCMeta
 import hashlib
 import Cookie
 import cookielib
+import os
 import re
 from netlib import odict, wsgi
 import netlib.http
@@ -201,12 +202,12 @@ class ClientPlaybackState:
 
 
 class ServerPlaybackState:
-    def __init__(self, headers, flows, exit, nopop, ignore_params, ignore_content):
+    def __init__(self, headers, flows, exit, nopop, ignore_params, ignore_content, ignore_payload_params):
         """
             headers: Case-insensitive list of request headers that should be
             included in request-response matching.
         """
-        self.headers, self.exit, self.nopop, self.ignore_params, self.ignore_content = headers, exit, nopop, ignore_params, ignore_content
+        self.headers, self.exit, self.nopop, self.ignore_params, self.ignore_content, self.ignore_payload_params = headers, exit, nopop, ignore_params, ignore_content, ignore_payload_params
         self.fmap = {}
         for i in flows:
             if i.response:
@@ -225,22 +226,29 @@ class ServerPlaybackState:
         _, _, path, _, query, _ = urlparse.urlparse(r.url)
         queriesArray = urlparse.parse_qsl(query)
 
-        filtered = []
-        ignore_params = self.ignore_params or []
-        for p in queriesArray:
-            if p[0] not in ignore_params:
-                filtered.append(p)
-
         key = [
             str(r.host),
             str(r.port),
             str(r.scheme),
             str(r.method),
             str(path),
-         ]
-        if not self.ignore_content:
-            key.append(str(r.content))
+        ]
 
+        if not self.ignore_content:
+            form_contents = r.get_form_urlencoded()
+            if self.ignore_payload_params and form_contents:
+                key.extend(
+                    p for p in form_contents
+                    if p[0] not in self.ignore_payload_params
+                )
+            else:
+                key.append(str(r.content))
+
+        filtered = []
+        ignore_params = self.ignore_params or []
+        for p in queriesArray:
+            if p[0] not in ignore_params:
+                filtered.append(p)
         for p in filtered:
             key.append(p[0])
             key.append(p[1])
@@ -414,11 +422,17 @@ class FlowStore(FlowList):
     Responsible for handling flows in the state:
     Keeps a list of all flows and provides views on them.
     """
+
     def __init__(self):
         self._list = []
         self._set = set()  # Used for O(1) lookups
         self.views = []
         self._recalculate_views()
+
+    def get(self, flow_id):
+        for f in self._list:
+            if f.id == flow_id:
+                return f
 
     def __contains__(self, f):
         return f in self._set
@@ -486,9 +500,9 @@ class FlowStore(FlowList):
         return c
 
     # TODO: Should accept_all operate on views or on all flows?
-    def accept_all(self):
+    def accept_all(self, master):
         for f in self._list:
-            f.accept_intercept()
+            f.accept_intercept(master)
 
     def kill_all(self, master):
         for f in self._list:
@@ -566,11 +580,12 @@ class State(object):
     def clear(self):
         self.flows._clear()
 
-    def accept_all(self):
-        self.flows.accept_all()
+    def accept_all(self, master):
+        self.flows.accept_all(master)
 
     def revert(self, f):
         f.revert()
+        self.update_flow(f)
 
     def killall(self, master):
         self.flows.kill_all(master)
@@ -600,7 +615,6 @@ class FlowMaster(controller.Master):
         self.setheaders = SetHeaders()
         self.replay_ignore_params = False
         self.replay_ignore_content = None
-
 
         self.stream = None
         self.apps = AppRegistry()
@@ -697,14 +711,16 @@ class FlowMaster(controller.Master):
     def stop_client_playback(self):
         self.client_playback = None
 
-    def start_server_playback(self, flows, kill, headers, exit, nopop, ignore_params, ignore_content):
+    def start_server_playback(self, flows, kill, headers, exit, nopop, ignore_params, ignore_content,
+                              ignore_payload_params):
         """
             flows: List of flows.
             kill: Boolean, should we kill requests not part of the replay?
             ignore_params: list of parameters to ignore in server replay
             ignore_content: true if request content should be ignored in server replay
         """
-        self.server_playback = ServerPlaybackState(headers, flows, exit, nopop, ignore_params, ignore_content)
+        self.server_playback = ServerPlaybackState(headers, flows, exit, nopop, ignore_params, ignore_content,
+                                                   ignore_payload_params)
         self.kill_nonreplay = kill
 
     def stop_server_playback(self):
@@ -770,8 +786,20 @@ class FlowMaster(controller.Master):
         """
             Load flows from a FlowReader object.
         """
+        cnt = 0
         for i in fr.stream():
+            cnt += 1
             self.load_flow(i)
+        return cnt
+
+    def load_flows_file(self, path):
+        path = os.path.expanduser(path)
+        try:
+            f = file(path, "rb")
+            freader = FlowReader(f)
+        except IOError, v:
+            raise FlowReadError(v.strerror)
+        return self.load_flows(freader)
 
     def process_new_request(self, f):
         if self.stickycookie_state:
@@ -802,11 +830,12 @@ class FlowMaster(controller.Master):
         """
         if f.live:
             return "Can't replay request which is still live..."
-        if f.intercepting:
+        if f.intercepted:
             return "Can't replay while intercepting..."
         if f.request.content == http.CONTENT_MISSING:
             return "Can't replay request with missing content..."
         if f.request:
+            f.backup()
             f.request.is_replay = True
             if f.request.content:
                 f.request.headers["Content-Length"] = [str(len(f.request.content))]
@@ -857,7 +886,7 @@ class FlowMaster(controller.Master):
                     **{"mitmproxy.master": self}
                 )
                 if err:
-                    self.add_event("Error in wsgi app. %s"%err, "error")
+                    self.add_event("Error in wsgi app. %s" % err, "error")
                 f.reply(protocol.KILL)
                 return
         if f not in self.state.flows:  # don't add again on replay
@@ -892,6 +921,12 @@ class FlowMaster(controller.Master):
         if self.stream:
             self.stream.add(f)
         return f
+
+    def handle_intercept(self, f):
+        self.state.update_flow(f)
+
+    def handle_accept_intercept(self, f):
+        self.state.update_flow(f)
 
     def shutdown(self):
         self.unload_scripts()
@@ -939,7 +974,9 @@ class FlowReader:
                 data = tnetstring.load(self.fo)
                 if tuple(data["version"][:2]) != version.IVERSION[:2]:
                     v = ".".join(str(i) for i in data["version"])
-                    raise FlowReadError("Incompatible serialized data version: %s"%v)
+                    raise FlowReadError(
+                        "Incompatible serialized data version: %s" % v
+                    )
                 off = self.fo.tell()
                 yield handle.protocols[data["type"]]["flow"].from_state(data)
         except ValueError, v:

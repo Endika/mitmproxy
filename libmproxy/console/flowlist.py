@@ -140,7 +140,7 @@ class ConnectionItem(common.WWrap):
     def keypress(self, (maxcol,), key):
         key = common.shortcuts(key)
         if key == "a":
-            self.flow.accept_intercept()
+            self.flow.accept_intercept(self.master)
             self.master.sync_list_view()
         elif key == "d":
             self.flow.kill(self.master)
@@ -150,7 +150,6 @@ class ConnectionItem(common.WWrap):
             f = self.master.duplicate_flow(self.flow)
             self.master.view_flow(f)
         elif key == "r":
-            self.flow.backup()
             r = self.master.replay_request(self.flow)
             if r:
                 self.master.statusbar.message(r)
@@ -264,7 +263,7 @@ class FlowListBox(urwid.ListBox):
                 self.master.path_prompt(
                     "Stream flows to: ",
                     self.master.state.last_saveload,
-                    self.master.start_stream
+                    self.master.start_stream_to_path
                 )
         else:
             return urwid.ListBox.keypress(self, size, key)

@@ -332,6 +332,10 @@ class ConsoleState(flow.State):
         self.set_focus(self.focus)
         return ret
 
+    def clear(self):
+        self.focus = None
+        super(ConsoleState, self).clear()
+
 
 
 class Options(object):
@@ -432,20 +436,20 @@ class ConsoleMaster(flow.FlowMaster):
                     print >> sys.stderr, "Script load error:", err
                     sys.exit(1)
 
-        if options.wfile:
-            err = self.start_stream(options.wfile)
+        if options.outfile:
+            err = self.start_stream_to_path(options.outfile[0], options.outfile[1])
             if err:
-                print >> sys.stderr, "Script load error:", err
+                print >> sys.stderr, "Stream file error:", err
                 sys.exit(1)
 
         if options.app:
             self.start_app(self.options.app_host, self.options.app_port)
 
-    def start_stream(self, path):
+    def start_stream_to_path(self, path, mode="wb"):
         path = os.path.expanduser(path)
         try:
-            f = file(path, "wb")
-            flow.FlowMaster.start_stream(self, f, None)
+            f = file(path, mode)
+            self.start_stream(f, None)
         except IOError, v:
             return str(v)
         self.stream_path = path
@@ -595,13 +599,20 @@ class ConsoleMaster(flow.FlowMaster):
 
         self.view_flowlist()
 
-        self.server.start_slave(controller.Slave, controller.Channel(self.masterq, self.should_exit))
+        self.server.start_slave(
+            controller.Slave,
+            controller.Channel(self.masterq, self.should_exit)
+        )
 
         if self.options.rfile:
-            ret = self.load_flows(self.options.rfile)
+            ret = self.load_flows_path(self.options.rfile)
             if ret and self.state.flow_count():
-                self.add_event("File truncated or corrupted. Loaded as many flows as possible.","error")
-            elif not self.state.flow_count():
+                self.add_event(
+                    "File truncated or corrupted. "
+                    "Loaded as many flows as possible.",
+                    "error"
+                )
+            elif ret and not self.state.flow_count():
                 self.shutdown()
                 print >> sys.stderr, "Could not load file:", ret
                 sys.exit(1)
@@ -696,23 +707,16 @@ class ConsoleMaster(flow.FlowMaster):
     def load_flows_callback(self, path):
         if not path:
             return
-        ret = self.load_flows(path)
+        ret = self.load_flows_path(path)
         return ret or "Flows loaded from %s"%path
 
-    def load_flows(self, path):
+    def load_flows_path(self, path):
         self.state.last_saveload = path
-        path = os.path.expanduser(path)
-        try:
-            f = file(path, "rb")
-            fr = flow.FlowReader(f)
-        except IOError, v:
-            return v.strerror
         reterr = None
         try:
-            flow.FlowMaster.load_flows(self, fr)
+            flow.FlowMaster.load_flows_file(self, path)
         except flow.FlowReadError, v:
-            reterr = v.strerror
-        f.close()
+            reterr = str(v)
         if self.flow_list_walker:
             self.sync_list_view()
         return reterr
@@ -767,7 +771,7 @@ class ConsoleMaster(flow.FlowMaster):
         self.prompt_done()
 
     def accept_all(self):
-        self.state.accept_all()
+        self.state.accept_all(self)
 
     def set_limit(self, txt):
         v = self.state.set_limit(txt)
@@ -1040,7 +1044,7 @@ class ConsoleMaster(flow.FlowMaster):
 
     def process_flow(self, f):
         if self.state.intercept and f.match(self.state.intercept) and not f.request.is_replay:
-            f.intercept()
+            f.intercept(self)
         else:
             f.reply()
         self.sync_list_view()

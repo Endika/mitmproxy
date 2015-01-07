@@ -309,7 +309,8 @@ class HTTPRequest(HTTPMessage):
         host=str,
         port=int,
         path=str,
-        form_out=str
+        form_out=str,
+        is_replay=bool
     )
 
     @classmethod
@@ -882,7 +883,7 @@ class HTTPFlow(Flow):
 
     The following additional attributes are exposed:
 
-        intercepting: Is this flow currently being intercepted?
+        intercepted: Is this flow currently being intercepted?
         live: Does this flow have a live client connection?
     """
 
@@ -892,9 +893,6 @@ class HTTPFlow(Flow):
         """@type: HTTPRequest"""
         self.response = None
         """@type: HTTPResponse"""
-
-        # FIXME: Should that rather be an attribute of Flow?
-        self.intercepting = False
 
     _stateobject_attributes = Flow._stateobject_attributes.copy()
     _stateobject_attributes.update(
@@ -941,30 +939,6 @@ class HTTPFlow(Flow):
         if f:
             return f(self)
         return True
-
-    def kill(self, master):
-        """
-            Kill this request.
-        """
-        self.error = Error("Connection killed")
-        self.intercepting = False
-        self.reply(KILL)
-        self.reply = controller.DummyReply()
-        master.handle_error(self)
-
-    def intercept(self):
-        """
-            Intercept this Flow. Processing will stop until accept_intercept is
-            called.
-        """
-        self.intercepting = True
-
-    def accept_intercept(self):
-        """
-            Continue with the flow - called after an intercept().
-        """
-        self.intercepting = False
-        self.reply()
 
     def replace(self, pattern, repl, *args, **kwargs):
         """
