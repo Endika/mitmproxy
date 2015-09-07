@@ -1,6 +1,8 @@
-from __future__ import absolute_import
+from __future__ import (absolute_import, print_function, division)
+
 import copy
 import os
+
 from netlib import tcp, certutils
 from .. import stateobject, utils
 
@@ -10,7 +12,7 @@ class ClientConnection(tcp.BaseHandler, stateobject.StateObject):
         # Eventually, this object is restored from state. We don't have a
         # connection then.
         if client_connection:
-            tcp.BaseHandler.__init__(self, client_connection, address, server)
+            super(ClientConnection, self).__init__(client_connection, address, server)
         else:
             self.connection = None
             self.server = None
@@ -23,6 +25,10 @@ class ClientConnection(tcp.BaseHandler, stateobject.StateObject):
         self.timestamp_start = utils.timestamp()
         self.timestamp_end = None
         self.timestamp_ssl_setup = None
+        self.protocol = None
+
+    def __nonzero__(self):
+        return bool(self.connection) and not self.finished
 
     def __repr__(self):
         return "<ClientConnection: {ssl}{host}:{port}>".format(
@@ -30,6 +36,10 @@ class ClientConnection(tcp.BaseHandler, stateobject.StateObject):
             host=self.address.host,
             port=self.address.port
         )
+
+    @property
+    def tls_established(self):
+        return self.ssl_established
 
     _stateobject_attributes = dict(
         ssl_established=bool,
@@ -58,6 +68,8 @@ class ClientConnection(tcp.BaseHandler, stateobject.StateObject):
         return copy.copy(self)
 
     def send(self, message):
+        if isinstance(message, list):
+            message = b''.join(message)
         self.wfile.write(message)
         self.wfile.flush()
 
@@ -68,11 +80,11 @@ class ClientConnection(tcp.BaseHandler, stateobject.StateObject):
         return f
 
     def convert_to_ssl(self, *args, **kwargs):
-        tcp.BaseHandler.convert_to_ssl(self, *args, **kwargs)
+        super(ClientConnection, self).convert_to_ssl(*args, **kwargs)
         self.timestamp_ssl_setup = utils.timestamp()
 
     def finish(self):
-        tcp.BaseHandler.finish(self)
+        super(ClientConnection, self).finish()
         self.timestamp_end = utils.timestamp()
 
 
@@ -80,11 +92,15 @@ class ServerConnection(tcp.TCPClient, stateobject.StateObject):
     def __init__(self, address):
         tcp.TCPClient.__init__(self, address)
 
-        self.state = []  # a list containing (conntype, state) tuples
+        self.via = None
         self.timestamp_start = None
         self.timestamp_end = None
         self.timestamp_tcp_setup = None
         self.timestamp_ssl_setup = None
+        self.protocol = None
+
+    def __nonzero__(self):
+        return bool(self.connection) and not self.finished
 
     def __repr__(self):
         if self.ssl_established and self.sni:
@@ -99,8 +115,11 @@ class ServerConnection(tcp.TCPClient, stateobject.StateObject):
             port=self.address.port
         )
 
+    @property
+    def tls_established(self):
+        return self.ssl_established
+
     _stateobject_attributes = dict(
-        state=list,
         timestamp_start=float,
         timestamp_end=float,
         timestamp_tcp_setup=float,
@@ -118,8 +137,8 @@ class ServerConnection(tcp.TCPClient, stateobject.StateObject):
         d.update(
             address={"address": self.address(),
                      "use_ipv6": self.address.use_ipv6},
-            source_address= ({"address": self.source_address(),
-                              "use_ipv6": self.source_address.use_ipv6} if self.source_address else None),
+            source_address=({"address": self.source_address(),
+                             "use_ipv6": self.source_address.use_ipv6} if self.source_address else None),
             cert=self.cert.to_pem() if self.cert else None
         )
         return d
@@ -149,6 +168,8 @@ class ServerConnection(tcp.TCPClient, stateobject.StateObject):
         self.timestamp_tcp_setup = utils.timestamp()
 
     def send(self, message):
+        if isinstance(message, list):
+            message = b''.join(message)
         self.wfile.write(message)
         self.wfile.flush()
 
@@ -160,6 +181,7 @@ class ServerConnection(tcp.TCPClient, stateobject.StateObject):
                 self.address.host.encode("idna")) + ".pem"
             if os.path.exists(path):
                 clientcert = path
+
         self.convert_to_ssl(cert=clientcert, sni=sni, **kwargs)
         self.sni = sni
         self.timestamp_ssl_setup = utils.timestamp()
@@ -167,3 +189,6 @@ class ServerConnection(tcp.TCPClient, stateobject.StateObject):
     def finish(self):
         tcp.TCPClient.finish(self)
         self.timestamp_end = utils.timestamp()
+
+
+ServerConnection._stateobject_attributes["via"] = ServerConnection

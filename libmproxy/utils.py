@@ -1,11 +1,8 @@
 from __future__ import absolute_import
 import os
 import datetime
-import urllib
 import re
 import time
-import functools
-import cgi
 import json
 
 
@@ -58,49 +55,6 @@ def pretty_json(s):
     except ValueError:
         return None
     return json.dumps(p, sort_keys=True, indent=4).split("\n")
-
-
-def urldecode(s):
-    """
-        Takes a urlencoded string and returns a list of (key, value) tuples.
-    """
-    return cgi.parse_qsl(s, keep_blank_values=True)
-
-
-def urlencode(s):
-    """
-        Takes a list of (key, value) tuples and returns a urlencoded string.
-    """
-    s = [tuple(i) for i in s]
-    return urllib.urlencode(s, False)
-
-
-def multipartdecode(hdrs, content):
-    """
-        Takes a multipart boundary encoded string and returns list of (key, value) tuples.
-    """
-    v = hdrs.get_first("content-type")
-    if v:
-        v = parse_content_type(v)
-        if not v:
-            return []
-        boundary = v[2].get("boundary")
-        if not boundary:
-            return []
-
-        rx = re.compile(r'\bname="([^"]+)"')
-        r = []
-
-        for i in content.split("--" + boundary):
-            parts = i.splitlines()
-            if len(parts) > 1 and parts[0][0:2] != "--":
-                match = rx.search(parts[1])
-                if match:
-                    key = match.group(1)
-                    value = "".join(parts[3 + parts[2:].index(""):])
-                    r.append((key, value))
-        return r
-    return []
 
 
 def pretty_duration(secs):
@@ -166,50 +120,6 @@ class LRUCache:
                 d = self.cacheList.pop()
                 self.cache.pop(d)
             return ret
-
-
-def parse_content_type(c):
-    """
-        A simple parser for content-type values. Returns a (type, subtype,
-        parameters) tuple, where type and subtype are strings, and parameters
-        is a dict. If the string could not be parsed, return None.
-
-        E.g. the following string:
-
-            text/html; charset=UTF-8
-
-        Returns:
-
-            ("text", "html", {"charset": "UTF-8"})
-    """
-    parts = c.split(";", 1)
-    ts = parts[0].split("/", 1)
-    if len(ts) != 2:
-        return None
-    d = {}
-    if len(parts) == 2:
-        for i in parts[1].split(";"):
-            clause = i.split("=", 1)
-            if len(clause) == 2:
-                d[clause[0].strip()] = clause[1].strip()
-    return ts[0].lower(), ts[1].lower(), d
-
-
-def hostport(scheme, host, port):
-    """
-        Returns the host component, with a port specifcation if needed.
-    """
-    if (port, scheme) in [(80, "http"), (443, "https")]:
-        return host
-    else:
-        return "%s:%s" % (host, port)
-
-
-def unparse_url(scheme, host, port, path=""):
-    """
-        Returns a URL string, constructed from the specified compnents.
-    """
-    return "%s://%s%s" % (scheme, hostport(scheme, host, port), path)
 
 
 def clean_hanging_newline(t):
