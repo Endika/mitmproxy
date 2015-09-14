@@ -1,14 +1,17 @@
 from __future__ import (absolute_import, print_function, division)
 
 import struct
+import sys
 
 from construct import ConstructError
+import six
 
 from netlib.tcp import NetLibError, NetLibInvalidCertificateError
 from netlib.http.http1 import HTTP1Protocol
 from ..contrib.tls._constructs import ClientHello
-from ..exceptions import ProtocolException, TlsException
+from ..exceptions import ProtocolException, TlsException, ClientHandshakeException
 from .base import Layer
+
 
 
 # taken from https://testssl.sh/openssl-rfc.mappping.html
@@ -387,7 +390,7 @@ class TlsLayer(Layer):
                 self._establish_tls_with_client()
             except:
                 pass
-            raise e
+            six.reraise(*sys.exc_info())
 
         self._establish_tls_with_client()
 
@@ -405,8 +408,22 @@ class TlsLayer(Layer):
                 chain_file=chain_file,
                 alpn_select_callback=self.__alpn_select_callback,
             )
+            # Some TLS clients will not fail the handshake,
+            # but will immediately throw an "unexpected eof" error on the first read.
+            # The reason for this might be difficult to find, so we try to peek here to see if it
+            # raises ann error.
+            self.client_conn.rfile.peek(1)
         except NetLibError as e:
-            raise TlsException("Cannot establish TLS with client: %s" % repr(e), e)
+            six.reraise(
+                ClientHandshakeException,
+                ClientHandshakeException(
+                    "Cannot establish TLS with client (sni: {sni}): {e}".format(
+                        sni=self.client_sni, e=repr(e)
+                    ),
+                    self.client_sni or repr(self.server_conn.address)
+                ),
+                sys.exc_info()[2]
+            )
 
     def _establish_tls_with_server(self):
         self.log("Establish TLS with server", "debug")
@@ -416,9 +433,11 @@ class TlsLayer(Layer):
             # and mitmproxy would enter TCP passthrough mode, which we want to avoid.
             deprecated_http2_variant = lambda x: x.startswith("h2-") or x.startswith("spdy")
             if self.client_alpn_protocols:
-                alpn = filter(lambda x: not deprecated_http2_variant(x), self.client_alpn_protocols)
+                alpn = [x for x in self.client_alpn_protocols if not deprecated_http2_variant(x)]
             else:
                 alpn = None
+            if alpn and "h2" in alpn and not self.config.http2 :
+                alpn.remove("h2")
 
             ciphers_server = self.config.ciphers_server
             if not ciphers_server:
@@ -453,17 +472,25 @@ class TlsLayer(Layer):
                 (tls_cert_err['depth'], tls_cert_err['errno']),
                 "error")
             self.log("Aborting connection attempt", "error")
-            raise TlsException("Cannot establish TLS with {address} (sni: {sni}): {e}".format(
-                address=repr(self.server_conn.address),
-                sni=self.sni_for_server_connection,
-                e=repr(e),
-            ), e)
+            six.reraise(
+                TlsException,
+                TlsException("Cannot establish TLS with {address} (sni: {sni}): {e}".format(
+                    address=repr(self.server_conn.address),
+                    sni=self.sni_for_server_connection,
+                    e=repr(e),
+                )),
+                sys.exc_info()[2]
+            )
         except NetLibError as e:
-            raise TlsException("Cannot establish TLS with {address} (sni: {sni}): {e}".format(
-                address=repr(self.server_conn.address),
-                sni=self.sni_for_server_connection,
-                e=repr(e),
-            ), e)
+            six.reraise(
+                TlsException,
+                TlsException("Cannot establish TLS with {address} (sni: {sni}): {e}".format(
+                    address=repr(self.server_conn.address),
+                    sni=self.sni_for_server_connection,
+                    e=repr(e),
+                )),
+                sys.exc_info()[2]
+            )
 
         self.log("ALPN selected by server: %s" % self.alpn_for_client_connection, "debug")
 

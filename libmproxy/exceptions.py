@@ -16,13 +16,11 @@ class ProxyException(Exception):
         message: the error message
         cause: (optional) an error object that caused this exception, e.g. an IOError.
     """
-    def __init__(self, message, cause=None):
+    def __init__(self, message):
         """
         :param message: Error Message
-        :param cause: Exception object that caused this exception to be thrown.
         """
         super(ProxyException, self).__init__(message)
-        self.cause = cause
 
 
 class ProtocolException(ProxyException):
@@ -31,6 +29,12 @@ class ProtocolException(ProxyException):
 
 class TlsException(ProtocolException):
     pass
+
+
+class ClientHandshakeException(TlsException):
+    def __init__(self, message, server):
+        super(ClientHandshakeException, self).__init__(message)
+        self.server = server
 
 
 class Socks5Exception(ProtocolException):
@@ -46,4 +50,8 @@ class InvalidCredentials(HttpException):
 
 
 class ServerException(ProxyException):
+    pass
+
+
+class ContentViewException(ProxyException):
     pass

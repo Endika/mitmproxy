@@ -1,23 +1,38 @@
-from __future__ import absolute_import
+"""
+Mitmproxy Content Views
+=======================
+
+mitmproxy includes a set of content views which can be used to format/decode/highlight data.
+While they are currently used for HTTP message bodies only, the may be used in other contexts
+in the future, e.g. to decode protobuf messages sent as WebSocket frames.
+
+Thus, the View API is very minimalistic. The only arguments are `data` and `**metadata`,
+where `data` is the actual content (as bytes). The contents on metadata depend on the protocol in
+use. For HTTP, the message headers are passed as the ``headers`` keyword argument.
+
+"""
+from __future__ import (absolute_import, print_function, division)
 import cStringIO
 import json
 import logging
+import subprocess
+import sys
+
 import lxml.html
 import lxml.etree
 from PIL import Image
 from PIL.ExifTags import TAGS
-import subprocess
-import traceback
-import urwid
 import html2text
+import six
 
-import netlib.utils
+from netlib.odict import ODict
 from netlib import encoding
+from netlib.utils import clean_bin, hexdump, urldecode, multipartdecode, parse_content_type
 
-from . import common, signals
-from .. import utils
-from ..contrib import jsbeautifier
-from ..contrib.wbxml.ASCommandResponse import ASCommandResponse
+from . import utils
+from .exceptions import ContentViewException
+from .contrib import jsbeautifier
+from .contrib.wbxml.ASCommandResponse import ASCommandResponse
 
 try:
     import pyamf
@@ -37,89 +52,119 @@ else:
     cssutils.ser.prefs.indentClosingBrace = False
     cssutils.ser.prefs.validOnly = False
 
-VIEW_CUTOFF = 1024 * 50
+# Default view cutoff *in lines*
+VIEW_CUTOFF = 512
+
+KEY_MAX = 30
 
 
-def _view_text(content, total, limit):
+def format_dict(d):
     """
-        Generates a body for a chunk of text.
+    Helper function that transforms the given dictionary into a list of
+        ("key",   key  )
+        ("value", value)
+    tuples, where key is padded to a uniform width.
     """
-    txt = []
-    for i in netlib.utils.cleanBin(content).splitlines():
-        txt.append(
-            urwid.Text(("text", i), wrap="any")
-        )
-    trailer(total, txt, limit)
-    return txt
+    max_key_len = max(len(k) for k in d.keys())
+    max_key_len = min(max_key_len, KEY_MAX)
+    for key, value in d.items():
+        key += ":"
+        key = key.ljust(max_key_len + 2)
+        yield [
+            ("header", key),
+            ("text", value)
+        ]
 
 
-def trailer(clen, txt, limit):
-    rem = clen - limit
-    if rem > 0:
-        txt.append(urwid.Text(""))
-        txt.append(
-            urwid.Text(
-                [
-                    ("highlight", "... %s of data not shown. Press " % netlib.utils.pretty_size(rem)),
-                    ("key", "f"),
-                    ("highlight", " to load all data.")
-                ]
-            )
-        )
+def format_text(text):
+    """
+    Helper function that transforms bytes into the view output format.
+    """
+    for line in text.splitlines():
+        yield [("text", line)]
 
 
-class ViewAuto:
+class View(object):
+    name = None
+    prompt = ()
+    content_types = []
+
+    def __call__(self, data, **metadata):
+        """
+        Transform raw data into human-readable output.
+
+        Args:
+            data: the data to decode/format as bytes.
+            metadata: optional keyword-only arguments for metadata. Implementations must not
+                rely on a given argument being present.
+
+        Returns:
+            A (description, content generator) tuple.
+
+            The content generator yields lists of (style, text) tuples, where each list represents
+            a single line. ``text`` is a unfiltered byte string which may need to be escaped,
+            depending on the used output.
+
+        Caveats:
+            The content generator must not yield tuples of tuples,
+            because urwid cannot process that. You have to yield a *list* of tuples per line.
+        """
+        raise NotImplementedError()
+
+
+class ViewAuto(View):
     name = "Auto"
     prompt = ("auto", "a")
     content_types = []
 
-    def __call__(self, hdrs, content, limit):
-        ctype = hdrs.get("content-type")
+    def __call__(self, data, **metadata):
+        headers = metadata.get("headers", {})
+        ctype = headers.get("content-type")
         if ctype:
-            ct = netlib.utils.parse_content_type(ctype) if ctype else None
+            ct = parse_content_type(ctype) if ctype else None
             ct = "%s/%s" % (ct[0], ct[1])
             if ct in content_types_map:
-                return content_types_map[ct][0](hdrs, content, limit)
-            elif utils.isXML(content):
-                return get("XML")(hdrs, content, limit)
-        return get("Raw")(hdrs, content, limit)
+                return content_types_map[ct][0](data, **metadata)
+            elif utils.isXML(data):
+                return get("XML")(data, **metadata)
+        if utils.isMostlyBin(data):
+            return get("Hex")(data)
+        return get("Raw")(data)
 
 
-class ViewRaw:
+class ViewRaw(View):
     name = "Raw"
     prompt = ("raw", "r")
     content_types = []
 
-    def __call__(self, hdrs, content, limit):
-        txt = _view_text(content[:limit], len(content), limit)
-        return "Raw", txt
+    def __call__(self, data, **metadata):
+        return "Raw", format_text(data)
 
 
-class ViewHex:
+class ViewHex(View):
     name = "Hex"
     prompt = ("hex", "e")
     content_types = []
 
-    def __call__(self, hdrs, content, limit):
-        txt = []
-        for offset, hexa, s in netlib.utils.hexdump(content[:limit]):
-            txt.append(urwid.Text([
-                ("offset", offset),
-                " ",
-                ("text", hexa),
-                "   ",
-                ("text", s),
-            ]))
-        trailer(len(content), txt, limit)
-        return "Hex", txt
+    @staticmethod
+    def _format(data):
+        for offset, hexa, s in hexdump(data):
+            yield [
+                ("offset", offset + " "),
+                ("text", hexa + "   "),
+                ("text", s)
+            ]
+
+    def __call__(self, data, **metadata):
+        return "Hex", self._format(data)
 
 
-class ViewXML:
+class ViewXML(View):
     name = "XML"
     prompt = ("xml", "x")
     content_types = ["text/xml"]
 
-    def __call__(self, hdrs, content, limit):
+    def __call__(self, data, **metadata):
         parser = lxml.etree.XMLParser(
             remove_blank_text=True,
             resolve_entities=False,
@@ -127,7 +172,7 @@ class ViewXML:
             recover=False
         )
         try:
-            document = lxml.etree.fromstring(content, parser)
+            document = lxml.etree.fromstring(data, parser)
         except lxml.etree.XMLSyntaxError:
             return None
         docinfo = document.getroottree().docinfo
@@ -150,108 +195,84 @@ class ViewXML:
             pretty_print=True,
             xml_declaration=True,
             doctype=doctype or None,
-            encoding = docinfo.encoding
+            encoding=docinfo.encoding
         )
 
-        txt = []
-        for i in s[:limit].strip().split("\n"):
-            txt.append(
-                urwid.Text(("text", i)),
-            )
-        trailer(len(content), txt, limit)
-        return "XML-like data", txt
+        return "XML-like data", format_text(s)
 
 
-class ViewJSON:
+class ViewJSON(View):
     name = "JSON"
     prompt = ("json", "s")
     content_types = ["application/json"]
 
-    def __call__(self, hdrs, content, limit):
-        lines = utils.pretty_json(content)
-        if lines:
-            txt = []
-            sofar = 0
-            for i in lines:
-                sofar += len(i)
-                txt.append(
-                    urwid.Text(("text", i)),
-                )
-                if sofar > limit:
-                    break
-            trailer(sum(len(i) for i in lines), txt, limit)
-            return "JSON", txt
+    def __call__(self, data, **metadata):
+        pretty_json = utils.pretty_json(data)
+        if pretty_json:
+            return "JSON", format_text(pretty_json)
 
 
-class ViewHTML:
+class ViewHTML(View):
     name = "HTML"
     prompt = ("html", "h")
     content_types = ["text/html"]
 
-    def __call__(self, hdrs, content, limit):
-        if utils.isXML(content):
+    def __call__(self, data, **metadata):
+        if utils.isXML(data):
             parser = lxml.etree.HTMLParser(
                 strip_cdata=True,
                 remove_blank_text=True
             )
-            d = lxml.html.fromstring(content, parser=parser)
+            d = lxml.html.fromstring(data, parser=parser)
             docinfo = d.getroottree().docinfo
             s = lxml.etree.tostring(
                 d,
                 pretty_print=True,
                 doctype=docinfo.doctype
             )
-            return "HTML", _view_text(s[:limit], len(s), limit)
+            return "HTML", format_text(s)
 
 
-class ViewHTMLOutline:
+class ViewHTMLOutline(View):
     name = "HTML Outline"
     prompt = ("html outline", "o")
     content_types = ["text/html"]
 
-    def __call__(self, hdrs, content, limit):
-        content = content.decode("utf-8")
+    def __call__(self, data, **metadata):
+        data = data.decode("utf-8")
         h = html2text.HTML2Text(baseurl="")
         h.ignore_images = True
         h.body_width = 0
-        content = h.handle(content)
-        txt = _view_text(content[:limit], len(content), limit)
-        return "HTML Outline", txt
+        outline = h.handle(data)
+        return "HTML Outline", format_text(outline)
 
 
-class ViewURLEncoded:
+class ViewURLEncoded(View):
     name = "URL-encoded"
     prompt = ("urlencoded", "u")
     content_types = ["application/x-www-form-urlencoded"]
 
-    def __call__(self, hdrs, content, limit):
-        lines = netlib.utils.urldecode(content)
-        if lines:
-            body = common.format_keyvals(
-                [(k + ":", v) for (k, v) in lines],
-                key = "header",
-                val = "text"
-            )
-            return "URLEncoded form", body
+    def __call__(self, data, **metadata):
+        d = urldecode(data)
+        return "URLEncoded form", format_dict(ODict(d))
 
 
-class ViewMultipart:
+class ViewMultipart(View):
     name = "Multipart Form"
     prompt = ("multipart", "m")
     content_types = ["multipart/form-data"]
 
-    def __call__(self, hdrs, content, limit):
-        v = netlib.utils.multipartdecode(hdrs, content)
+    @staticmethod
+    def _format(v):
+        yield [("highlight", "Form data:\n")]
+        for message in format_dict(ODict(v)):
+            yield message
+
+    def __call__(self, data, **metadata):
+        headers = metadata.get("headers", {})
+        v = multipartdecode(headers, data)
         if v:
-            r = [
-                urwid.Text(("highlight", "Form data:\n")),
-            ]
-            r.extend(common.format_keyvals(
-                v,
-                key = "header",
-                val = "text"
-            ))
-            return "Multipart form", r
+            return "Multipart form", self._format(v)
 
 
 if pyamf:
@@ -263,6 +284,7 @@ if pyamf:
             data = input.readObject()
             self["data"] = data
 
+
     def pyamf_class_loader(s):
         for i in pyamf.CLASS_LOADERS:
             if i != pyamf_class_loader:
@@ -271,9 +293,11 @@ if pyamf:
                     return v
         return DummyObject
 
+
     pyamf.register_class_loader(pyamf_class_loader)
 
-    class ViewAMF:
+
+    class ViewAMF(View):
         name = "AMF"
         prompt = ("amf", "f")
         content_types = ["application/x-amf"]
@@ -300,31 +324,30 @@ if pyamf:
             else:
                 return b
 
-        def __call__(self, hdrs, content, limit):
-            envelope = remoting.decode(content, strict=False)
-            if not envelope:
-                return None
-
-            txt = []
+        def _format(self, envelope):
             for target, message in iter(envelope):
                 if isinstance(message, pyamf.remoting.Request):
-                    txt.append(urwid.Text([
+                    yield [
                         ("header", "Request: "),
                         ("text", str(target)),
-                    ]))
+                    ]
                 else:
-                    txt.append(urwid.Text([
+                    yield [
                         ("header", "Response: "),
                         ("text", "%s, code %s" % (target, message.status)),
-                    ]))
+                    ]
 
                 s = json.dumps(self.unpack(message), indent=4)
-                txt.extend(_view_text(s[:limit], len(s), limit))
+                for msg in format_text(s):
+                    yield msg
 
-            return "AMF v%s" % envelope.amfVersion, txt
+        def __call__(self, data, **metadata):
+            envelope = remoting.decode(data, strict=False)
+            if envelope:
+                return "AMF v%s" % envelope.amfVersion, self._format(envelope)
 
 
-class ViewJavaScript:
+class ViewJavaScript(View):
     name = "JavaScript"
     prompt = ("javascript", "j")
     content_types = [
@@ -333,31 +356,31 @@ class ViewJavaScript:
         "text/javascript"
     ]
 
-    def __call__(self, hdrs, content, limit):
+    def __call__(self, data, **metadata):
         opts = jsbeautifier.default_options()
         opts.indent_size = 2
-        res = jsbeautifier.beautify(content[:limit], opts)
-        return "JavaScript", _view_text(res, len(res), limit)
+        res = jsbeautifier.beautify(data, opts)
+        return "JavaScript", format_text(res)
 
 
-class ViewCSS:
+class ViewCSS(View):
     name = "CSS"
     prompt = ("css", "c")
     content_types = [
         "text/css"
     ]
 
-    def __call__(self, hdrs, content, limit):
+    def __call__(self, data, **metadata):
         if cssutils:
-            sheet = cssutils.parseString(content)
+            sheet = cssutils.parseString(data)
             beautified = sheet.cssText
         else:
-            beautified = content
+            beautified = data
 
-        return "CSS", _view_text(beautified, len(beautified), limit)
+        return "CSS", format_text(beautified)
 
 
-class ViewImage:
+class ViewImage(View):
     name = "Image"
     prompt = ("image", "i")
     content_types = [
@@ -368,9 +391,9 @@ class ViewImage:
         "image/x-icon",
     ]
 
-    def __call__(self, hdrs, content, limit):
+    def __call__(self, data, **metadata):
         try:
-            img = Image.open(cStringIO.StringIO(content))
+            img = Image.open(cStringIO.StringIO(data))
         except IOError:
             return None
         parts = [
@@ -391,20 +414,11 @@ class ViewImage:
                     parts.append(
                         (str(tag), str(ex[i]))
                     )
-        clean = []
-        for i in parts:
-            clean.append(
-                [netlib.utils.cleanBin(i[0]), netlib.utils.cleanBin(i[1])]
-            )
-        fmt = common.format_keyvals(
-            clean,
-            key = "header",
-            val = "text"
-        )
+        fmt = format_dict(ODict(parts))
         return "%s image" % img.format, fmt
 
 
-class ViewProtobuf:
+class ViewProtobuf(View):
     """Human friendly view of protocol buffers
     The view uses the protoc compiler to decode the binary
     """
@@ -441,13 +455,12 @@ class ViewProtobuf:
         else:
             return err
 
-    def __call__(self, hdrs, content, limit):
-        decoded = self.decode_protobuf(content)
-        txt = _view_text(decoded[:limit], len(decoded), limit)
-        return "Protobuf", txt
+    def __call__(self, data, **metadata):
+        decoded = self.decode_protobuf(data)
+        return "Protobuf", format_text(decoded)
 
 
-class ViewWBXML:
+class ViewWBXML(View):
     name = "WBXML"
     prompt = ("wbxml", "w")
     content_types = [
@@ -455,15 +468,16 @@ class ViewWBXML:
         "application/vnd.ms-sync.wbxml"
     ]
 
-    def __call__(self, hdrs, content, limit):
+    def __call__(self, data, **metadata):
 
         try:
-            parser = ASCommandResponse(content)
+            parser = ASCommandResponse(data)
             parsedContent = parser.xmlString
-            txt = _view_text(parsedContent, len(parsedContent), limit)
-            return "WBXML", txt
+            if parsedContent:
+                return "WBXML", format_text(parsedContent)
         except:
             return None
+
 
 views = [
     ViewAuto(),
@@ -492,7 +506,6 @@ for i in views:
         l = content_types_map.setdefault(ct, [])
         l.append(i)
 
-
 view_prompts = [i.prompt for i in views]
 
 
@@ -508,34 +521,57 @@ def get(name):
             return i
 
 
-def get_content_view(viewmode, headers, content, limit, is_request):
+def safe_to_print(lines, encoding="utf8"):
     """
-        Returns a (msg, body) tuple.
+    Wraps a content generator so that each text portion is a *safe to print* unicode string.
     """
-    if not content:
-        if is_request:
-            return "No request content (press tab to view response)", ""
-        else:
-            return "No content", ""
+    for line in lines:
+        clean_line = []
+        for (style, text) in line:
+            try:
+                text = clean_bin(text.decode(encoding, "strict"))
+            except UnicodeDecodeError:
+                text = clean_bin(text).decode(encoding, "strict")
+            clean_line.append((style, text))
+        yield clean_line
+
+
+def get_content_view(viewmode, data, **metadata):
+    """
+        Args:
+            viewmode: the view to use.
+            data, **metadata: arguments passed to View instance.
+
+        Returns:
+            A (description, content generator) tuple.
+            In contrast to calling the views directly, text is always safe-to-print unicode.
+
+        Raises:
+            ContentViewException, if the content view threw an error.
+    """
+    if not data:
+        return "No content", []
     msg = []
 
+    headers = metadata.get("headers", {})
     enc = headers.get("content-encoding")
     if enc and enc != "identity":
-        decoded = encoding.decode(enc, content)
+        decoded = encoding.decode(enc, data)
         if decoded:
-            content = decoded
+            data = decoded
             msg.append("[decoded %s]" % enc)
     try:
-        ret = viewmode(headers, content, limit)
+        ret = viewmode(data, **metadata)
     # Third-party viewers can fail in unexpected ways...
-    except Exception:
-        s = traceback.format_exc()
-        s = "Content viewer failed: \n" + s
-        signals.add_event(s, "error")
-        ret = None
+    except Exception as e:
+        six.reraise(
+            ContentViewException,
+            ContentViewException(str(e)),
+            sys.exc_info()[2]
+        )
     if not ret:
-        ret = get("Raw")(headers, content, limit)
+        ret = get("Raw")(data, **metadata)
         msg.append("Couldn't parse: falling back to Raw")
     else:
         msg.append(ret[0])
-    return " ".join(msg), ret[1]
+    return " ".join(msg), safe_to_print(ret[1])

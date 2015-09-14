@@ -1,4 +1,9 @@
 from __future__ import (absolute_import, print_function, division)
+import itertools
+import sys
+import traceback
+
+import six
 
 from netlib import tcp
 from netlib.http import http1, HttpErrorConnClosed, HttpError, Headers
@@ -7,7 +12,6 @@ from netlib.tcp import NetLibError, Address
 from netlib.http.http1 import HTTP1Protocol
 from netlib.http.http2 import HTTP2Protocol
 from netlib.http.http2.frame import GoAwayFrame, PriorityFrame, WindowUpdateFrame
-
 from .. import utils
 from ..exceptions import InvalidCredentials, HttpException, ProtocolException
 from ..models import (
@@ -45,11 +49,24 @@ class _StreamingHttpLayer(_HttpLayer):
         raise NotImplementedError()
         yield "this is a generator"  # pragma: no cover
 
+    def read_response(self, request_method):
+        response = self.read_response_headers()
+        response.body = "".join(
+            self.read_response_body(response.headers, request_method, response.code)
+        )
+        return response
+
     def send_response_headers(self, response):
         raise NotImplementedError
 
     def send_response_body(self, response, chunks):
         raise NotImplementedError()
+
+    def send_response(self, response):
+        if response.body == CONTENT_MISSING:
+            raise HttpError(502, "Cannot assemble flow with CONTENT_MISSING")
+        self.send_response_headers(response)
+        self.send_response_body(response, [response.body])
 
 
 class Http1Layer(_StreamingHttpLayer):
@@ -67,17 +84,6 @@ class Http1Layer(_StreamingHttpLayer):
 
     def send_request(self, request):
         self.server_conn.send(self.server_protocol.assemble(request))
-
-    def read_response(self, request_method):
-        return HTTPResponse.from_protocol(
-            self.server_protocol,
-            request_method=request_method,
-            body_size_limit=self.config.body_size_limit,
-            include_body=True
-        )
-
-    def send_response(self, response):
-        self.client_conn.send(self.client_protocol.assemble(response))
 
     def read_response_headers(self):
         return HTTPResponse.from_protocol(
@@ -104,16 +110,21 @@ class Http1Layer(_StreamingHttpLayer):
             response,
             preserve_transfer_encoding=True
         )
-        self.client_conn.send(h + "\r\n")
+        self.client_conn.wfile.write(h + "\r\n")
+        self.client_conn.wfile.flush()
 
     def send_response_body(self, response, chunks):
         if self.client_protocol.has_chunked_encoding(response.headers):
-            chunks = (
-                "%d\r\n%s\r\n" % (len(chunk), chunk)
-                for chunk in chunks
+            chunks = itertools.chain(
+                (
+                    "{:x}\r\n{}\r\n".format(len(chunk), chunk)
+                    for chunk in chunks if chunk
+                ),
+                ("0\r\n\r\n",)
             )
         for chunk in chunks:
-            self.client_conn.send(chunk)
+            self.client_conn.wfile.write(chunk)
+            self.client_conn.wfile.flush()
 
     def check_close_connection(self, flow):
         close_connection = (
@@ -360,7 +371,13 @@ class HttpLayer(Layer):
                 if self.check_close_connection(flow):
                     return
 
-                # TODO: Implement HTTP Upgrade
+                # Handle 101 Switching Protocols
+                # It may be useful to pass additional args (such as the upgrade header)
+                # to next_layer in the future
+                if flow.response.status_code == 101:
+                    layer = self.ctx.next_layer(self)
+                    layer()
+                    return
 
                 # Upstream Proxy Mode: Handle CONNECT
                 if flow.request.form_in == "authority" and flow.response.code == 200:
@@ -368,9 +385,13 @@ class HttpLayer(Layer):
                     return
 
             except (HttpErrorConnClosed, NetLibError, HttpError, ProtocolException) as e:
+                error_propagated = False
                 if flow.request and not flow.response:
-                    flow.error = Error(repr(e))
+                    flow.error = Error(str(e))
                     self.channel.ask("error", flow)
+                    self.log(traceback.format_exc(), "debug")
+                    error_propagated = True
+
                 try:
                     self.send_response(make_error_response(
                         getattr(e, "code", 502),
@@ -378,10 +399,12 @@ class HttpLayer(Layer):
                     ))
                 except NetLibError:
                     pass
-                if isinstance(e, ProtocolException):
-                    raise e
-                else:
-                    raise ProtocolException("Error in HTTP connection: %s" % repr(e), e)
+
+                if not error_propagated:
+                    if isinstance(e, ProtocolException):
+                        six.reraise(ProtocolException, e, sys.exc_info()[2])
+                    else:
+                        six.reraise(ProtocolException, ProtocolException("Error in HTTP connection: %s" % repr(e)), sys.exc_info()[2])
             finally:
                 flow.live = False
 
@@ -511,7 +534,7 @@ class HttpLayer(Layer):
 
         if self.mode == "regular" or self.mode == "transparent":
             # If there's an existing connection that doesn't match our expectations, kill it.
-            if address != self.server_conn.address or tls != self.server_conn.ssl_established:
+            if address != self.server_conn.address or tls != self.server_conn.tls_established:
                 self.set_server(address, tls, address.host)
             # Establish connection is neccessary.
             if not self.server_conn:
