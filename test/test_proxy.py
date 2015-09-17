@@ -6,9 +6,11 @@ from libmproxy.proxy import ProxyConfig
 from libmproxy.proxy.config import process_proxy_options
 from libmproxy.models.connections import ServerConnection
 from libmproxy.proxy.server import DummyServer, ProxyServer, ConnectionHandler
+from netlib.exceptions import TcpDisconnect
 import tutils
 from libpathod import test
 from netlib import http, tcp
+from netlib.http import http1
 
 
 class TestServerConnection:
@@ -26,11 +28,10 @@ class TestServerConnection:
         f.request.path = "/p/200:da"
 
         # use this protocol just to assemble - not for actual sending
-        protocol = http.http1.HTTP1Protocol(rfile=sc.rfile)
-        sc.send(protocol.assemble(f.request))
+        sc.wfile.write(http1.assemble_request(f.request))
+        sc.wfile.flush()
 
-        protocol = http.http1.HTTP1Protocol(rfile=sc.rfile)
-        assert protocol.read_response(f.request.method, 1000)
+        assert http1.read_response(sc.rfile, f.request, 1000)
         assert self.d.last_log()
 
         sc.finish()
@@ -40,7 +41,7 @@ class TestServerConnection:
         sc.connect()
         sc.connection = mock.Mock()
         sc.connection.recv = mock.Mock(return_value=False)
-        sc.connection.flush = mock.Mock(side_effect=tcp.NetLibDisconnect)
+        sc.connection.flush = mock.Mock(side_effect=TcpDisconnect)
         sc.finish()
 
     def test_repr(self):
