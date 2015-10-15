@@ -168,7 +168,7 @@ class FlowView(tabs.Tabs):
             self.show()
 
     def content_view(self, viewmode, message):
-        if message.body == CONTENT_MISSING:
+        if message.content == CONTENT_MISSING:
             msg, body = "", [urwid.Text([("error", "[content missing]")])]
             return msg, body
         else:
@@ -185,20 +185,21 @@ class FlowView(tabs.Tabs):
                 self._get_content_view,
                 viewmode,
                 message,
-                limit
+                limit,
+                (bytes(message.headers), message.content)  # Cache invalidation
             )
 
-    def _get_content_view(self, viewmode, message, max_lines):
+    def _get_content_view(self, viewmode, message, max_lines, _):
 
         try:
             description, lines = contentviews.get_content_view(
-                viewmode, message.body, headers=message.headers
+                viewmode, message.content, headers=message.headers
             )
         except ContentViewException:
             s = "Content viewer failed: \n" + traceback.format_exc()
             signals.add_event(s, "error")
             description, lines = contentviews.get_content_view(
-                contentviews.get("Raw"), message.body, headers=message.headers
+                contentviews.get("Raw"), message.content, headers=message.headers
             )
             description = description.replace("Raw", "Couldn't parse: falling back to Raw")
 

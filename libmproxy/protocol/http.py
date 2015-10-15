@@ -15,7 +15,7 @@ from netlib.http.http2.frame import GoAwayFrame, PriorityFrame, WindowUpdateFram
 from .. import utils
 from ..exceptions import HttpProtocolException, ProtocolException
 from ..models import (
-    HTTPFlow, HTTPRequest, HTTPResponse, make_error_response, make_connect_response, Error
+    HTTPFlow, HTTPRequest, HTTPResponse, make_error_response, make_connect_response, Error, expect_continue_response
 )
 from .base import Layer, Kill
 
@@ -26,10 +26,13 @@ class _HttpLayer(Layer):
     def read_request(self):
         raise NotImplementedError()
 
+    def read_request_body(self, request):
+        raise NotImplementedError()
+
     def send_request(self, request):
         raise NotImplementedError()
 
-    def read_response(self, request_method):
+    def read_response(self, request):
         raise NotImplementedError()
 
     def send_response(self, response):
@@ -51,7 +54,7 @@ class _StreamingHttpLayer(_HttpLayer):
 
     def read_response(self, request):
         response = self.read_response_headers()
-        response.body = b"".join(
+        response.content = b"".join(
             self.read_response_body(request, response)
         )
         return response
@@ -63,10 +66,10 @@ class _StreamingHttpLayer(_HttpLayer):
         raise NotImplementedError()
 
     def send_response(self, response):
-        if response.body == CONTENT_MISSING:
+        if response.content == CONTENT_MISSING:
             raise HttpException("Cannot assemble flow with CONTENT_MISSING")
         self.send_response_headers(response)
-        self.send_response_body(response, [response.body])
+        self.send_response_body(response, [response.content])
 
 
 class Http1Layer(_StreamingHttpLayer):
@@ -77,6 +80,10 @@ class Http1Layer(_StreamingHttpLayer):
     def read_request(self):
         req = http1.read_request(self.client_conn.rfile, body_size_limit=self.config.body_size_limit)
         return HTTPRequest.wrap(req)
+
+    def read_request_body(self, request):
+        expected_size = http1.expected_http_body_size(request)
+        return http1.read_body(self.client_conn.rfile, expected_size, self.config.body_size_limit)
 
     def send_request(self, request):
         self.server_conn.wfile.write(http1.assemble_request(request))
@@ -299,7 +306,7 @@ class HttpLayer(Layer):
             self.__original_server_conn = self.server_conn
         while True:
             try:
-                request = self.read_request()
+                request = self.get_request_from_client()
                 self.log("request", "debug", [repr(request)])
 
                 # Handle Proxy Authentication
@@ -330,7 +337,17 @@ class HttpLayer(Layer):
                 if not flow.response:
                     self.establish_server_connection(flow)
                     self.get_response_from_server(flow)
+                else:
+                    # response was set by an inline script.
+                    # we now need to emulate the responseheaders hook.
+                    flow = self.channel.ask("responseheaders", flow)
+                    if flow == Kill:
+                        raise Kill()
 
+                self.log("response", "debug", [repr(flow.response)])
+                flow = self.channel.ask("response", flow)
+                if flow == Kill:
+                    raise Kill()
                 self.send_response_to_client(flow)
 
                 if self.check_close_connection(flow):
@@ -361,6 +378,15 @@ class HttpLayer(Layer):
                     six.reraise(ProtocolException, ProtocolException("Error in HTTP connection: %s" % repr(e)), sys.exc_info()[2])
             finally:
                 flow.live = False
+
+    def get_request_from_client(self):
+        request = self.read_request()
+        if request.headers.get("expect", "").lower() == "100-continue":
+            # TODO: We may have to use send_response_headers for HTTP2 here.
+            self.send_response(expect_continue_response)
+            request.headers.pop("expect")
+            request.body = b"".join(self.read_request_body(request))
+        return request
 
     def send_error_response(self, code, message):
         try:
@@ -454,15 +480,6 @@ class HttpLayer(Layer):
         # we can safely set it as the final attribute value here.
         flow.server_conn = self.server_conn
 
-        self.log(
-            "response",
-            "debug",
-            [repr(flow.response)]
-        )
-        response_reply = self.channel.ask("response", flow)
-        if response_reply == Kill:
-            raise Kill()
-
     def process_request_hook(self, flow):
         # Determine .scheme, .host and .port attributes for inline scripts.
         # For absolute-form requests, they are directly given in the request.
@@ -475,8 +492,13 @@ class HttpLayer(Layer):
             if flow.request.form_in == "authority":
                 flow.request.scheme = "http"  # pseudo value
         else:
+            # Setting request.host also updates the host header, which we want to preserve
+            host_header = flow.request.headers.get("host", None)
             flow.request.host = self.__original_server_conn.address.host
             flow.request.port = self.__original_server_conn.address.port
+            if host_header:
+                flow.request.headers["host"] = host_header
+            # TODO: This does not really work if we change the first request and --no-upstream-cert is enabled
             flow.request.scheme = "https" if self.__original_server_conn.tls_established else "http"
 
         request_reply = self.channel.ask("request", flow)

@@ -6,9 +6,9 @@ import six
 
 from libmproxy.exceptions import ProtocolException
 from netlib.exceptions import TcpException
-from netlib.http import ALPN_PROTO_H2, ALPN_PROTO_HTTP1
 from ..protocol import (
-    RawTCPLayer, TlsLayer, Http1Layer, Http2Layer, is_tls_record_magic, ServerConnectionMixin
+    RawTCPLayer, TlsLayer, Http1Layer, Http2Layer, is_tls_record_magic, ServerConnectionMixin,
+    UpstreamConnectLayer
 )
 from .modes import HttpProxy, HttpUpstreamProxy, ReverseProxy
 
@@ -63,7 +63,7 @@ class RootContext(object):
         # in which case we need some form of TLS layer.
         if isinstance(top_layer, ReverseProxy):
             return TlsLayer(top_layer, client_tls, top_layer.server_tls)
-        if isinstance(top_layer, ServerConnectionMixin):
+        if isinstance(top_layer, ServerConnectionMixin) or isinstance(top_layer, UpstreamConnectLayer):
             return TlsLayer(top_layer, client_tls, client_tls)
 
         # 3. In Http Proxy mode and Upstream Proxy mode, the next layer is fixed.
@@ -84,9 +84,9 @@ class RootContext(object):
         # 5. Check for TLS ALPN (HTTP1/HTTP2)
         if isinstance(top_layer, TlsLayer):
             alpn = top_layer.client_conn.get_alpn_proto_negotiated()
-            if alpn == ALPN_PROTO_H2:
+            if alpn == b'h2':
                 return Http2Layer(top_layer, 'transparent')
-            if alpn == ALPN_PROTO_HTTP1:
+            if alpn == b'http/1.1':
                 return Http1Layer(top_layer, 'transparent')
 
         # 6. Check for raw tcp mode

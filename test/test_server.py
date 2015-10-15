@@ -118,17 +118,20 @@ class TcpMixin:
         del self._ignore_backup
 
     def test_ignore(self):
-        spec = '304:h"Alternate-Protocol"="mitmproxy-will-remove-this"'
-        n = self.pathod(spec)
+        n = self.pathod("304")
         self._ignore_on()
-        i = self.pathod(spec)
-        i2 = self.pathod(spec)
+        i = self.pathod("305")
+        i2 = self.pathod("306")
         self._ignore_off()
 
-        assert i.status_code == i2.status_code == n.status_code == 304
-        assert "Alternate-Protocol" in i.headers
-        assert "Alternate-Protocol" in i2.headers
-        assert "Alternate-Protocol" not in n.headers
+        self.master.masterq.join()
+
+        assert n.status_code == 304
+        assert i.status_code == 305
+        assert i2.status_code == 306
+        assert any(f.response.status_code == 304 for f in self.master.state.flows)
+        assert not any(f.response.status_code == 305 for f in self.master.state.flows)
+        assert not any(f.response.status_code == 306 for f in self.master.state.flows)
 
         # Test that we get the original SSL cert
         if self.ssl:
@@ -157,21 +160,24 @@ class TcpMixin:
 
     def _tcpproxy_off(self):
         assert hasattr(self, "_tcpproxy_backup")
-        self.config.check_ignore = self._tcpproxy_backup
+        self.config.check_tcp = self._tcpproxy_backup
         del self._tcpproxy_backup
 
     def test_tcp(self):
-        spec = '304:h"Alternate-Protocol"="mitmproxy-will-remove-this"'
-        n = self.pathod(spec)
+        n = self.pathod("304")
         self._tcpproxy_on()
-        i = self.pathod(spec)
-        i2 = self.pathod(spec)
+        i = self.pathod("305")
+        i2 = self.pathod("306")
         self._tcpproxy_off()
 
-        assert i.status_code == i2.status_code == n.status_code == 304
-        assert "Alternate-Protocol" in i.headers
-        assert "Alternate-Protocol" in i2.headers
-        assert "Alternate-Protocol" not in n.headers
+        self.master.masterq.join()
+
+        assert n.status_code == 304
+        assert i.status_code == 305
+        assert i2.status_code == 306
+        assert any(f.response.status_code == 304 for f in self.master.state.flows)
+        assert not any(f.response.status_code == 305 for f in self.master.state.flows)
+        assert not any(f.response.status_code == 306 for f in self.master.state.flows)
 
         # Test that we get the original SSL cert
         if self.ssl:
@@ -182,7 +188,8 @@ class TcpMixin:
             assert i_cert == i2_cert == n_cert
 
         # Make sure that TCP messages are in the event log.
-        assert any("mitmproxy-will-remove-this" in m for m in self.master.log)
+        assert any("305" in m for m in self.master.log)
+        assert any("306" in m for m in self.master.log)
 
 
 class AppMixin:
@@ -228,7 +235,8 @@ class TestHTTP(tservers.HTTPProxTest, CommonMixin, AppMixin):
         # There's a race here, which means we can get any of a number of errors.
         # Rather than introduce yet another sleep into the test suite, we just
         # relax the Exception specification.
-        tutils.raises(Exception, p.request, "get:'%s'" % response)
+        with raises(Exception):
+            p.request("get:'%s'" % response)
 
     def test_reconnect(self):
         req = "get:'%s/p/200:b@1:da'" % self.server.urlbase
@@ -566,7 +574,6 @@ class TestProxy(tservers.HTTPProxTest):
             recvd += len(connection.recv(5000))
         connection.close()
 
-        print(self.master.state.view._list)
         first_flow = self.master.state.view[0]
         second_flow = self.master.state.view[1]
         assert first_flow.server_conn.timestamp_tcp_setup
@@ -609,7 +616,7 @@ class MasterRedirectRequest(tservers.TestMaster):
         super(MasterRedirectRequest, self).handle_request(f)
 
     def handle_response(self, f):
-        f.response.body = str(f.client_conn.address.port)
+        f.response.content = str(f.client_conn.address.port)
         f.response.headers["server-conn-id"] = str(f.server_conn.source_address.port)
         super(MasterRedirectRequest, self).handle_response(f)
 
@@ -885,23 +892,6 @@ class TestUpstreamProxySSL(
         # request from proxy to chain[1]
         # request from chain[0] (regular proxy doesn't store CONNECTs)
         assert self.chain[1].tmaster.state.flow_count() == 1
-
-    def test_closing_connect_response(self):
-        """
-        https://github.com/mitmproxy/mitmproxy/issues/313
-        """
-
-        def handle_request(f):
-            f.request.http_version = b"HTTP/1.1"
-            del f.request.headers["Content-Length"]
-            f.reply()
-
-        _handle_request = self.chain[0].tmaster.handle_request
-        self.chain[0].tmaster.handle_request = handle_request
-        try:
-            assert self.pathoc().request("get:/p/418").status_code == 418
-        finally:
-            self.chain[0].tmaster.handle_request = _handle_request
 
 
 class TestProxyChainingSSLReconnect(tservers.HTTPUpstreamProxTest):
