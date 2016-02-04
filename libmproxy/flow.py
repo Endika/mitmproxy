@@ -10,12 +10,10 @@ import os
 import re
 import urlparse
 
-
 from netlib import wsgi
 from netlib.exceptions import HttpException
 from netlib.http import CONTENT_MISSING, Headers, http1
-import netlib.http
-from . import controller, tnetstring, filt, script, version
+from . import controller, tnetstring, filt, script, version, flow_format_compat
 from .onboarding import app
 from .proxy.config import HostMatcher
 from .protocol.http_replay import RequestReplayThread
@@ -24,6 +22,7 @@ from .models import ClientConnection, ServerConnection, HTTPResponse, HTTPFlow, 
 
 
 class AppRegistry:
+
     def __init__(self):
         self.apps = {}
 
@@ -51,6 +50,7 @@ class AppRegistry:
 
 
 class ReplaceHooks:
+
     def __init__(self):
         self.lst = []
 
@@ -103,6 +103,7 @@ class ReplaceHooks:
 
 
 class SetHeaders:
+
     def __init__(self):
         self.lst = []
 
@@ -157,6 +158,7 @@ class SetHeaders:
 
 
 class StreamLargeBodies(object):
+
     def __init__(self, max_size):
         self.max_size = max_size
 
@@ -171,6 +173,7 @@ class StreamLargeBodies(object):
 
 
 class ClientPlaybackState:
+
     def __init__(self, flows, exit):
         self.flows, self.exit = flows, exit
         self.current = None
@@ -205,6 +208,7 @@ class ClientPlaybackState:
 
 
 class ServerPlaybackState:
+
     def __init__(
             self,
             headers,
@@ -297,6 +301,7 @@ class ServerPlaybackState:
 
 
 class StickyCookieState:
+
     def __init__(self, flt):
         """
             flt: Compiled filter.
@@ -344,10 +349,11 @@ class StickyCookieState:
                     l.append(self.jar[i].output(header="").strip())
         if l:
             f.request.stickycookie = True
-            f.request.headers.set_all("cookie",l)
+            f.request.headers.set_all("cookie", l)
 
 
 class StickyAuthState:
+
     def __init__(self, flt):
         """
             flt: Compiled filter.
@@ -399,6 +405,7 @@ class FlowList(object):
 
 
 class FlowView(FlowList):
+
     def __init__(self, store, filt=None):
         self._list = []
         if not filt:
@@ -435,6 +442,7 @@ class FlowView(FlowList):
 
 
 class FlowStore(FlowList):
+
     """
     Responsible for handling flows in the state:
     Keeps a list of all flows and provides views on them.
@@ -528,6 +536,7 @@ class FlowStore(FlowList):
 
 
 class State(object):
+
     def __init__(self):
         self.flows = FlowStore()
         self.view = FlowView(self.flows, None)
@@ -615,6 +624,7 @@ class State(object):
 
 
 class FlowMaster(controller.Master):
+
     def __init__(self, server, state):
         controller.Master.__init__(self, server)
         self.state = state
@@ -654,7 +664,6 @@ class FlowMaster(controller.Master):
         """
             level: debug, info, error
         """
-        pass
 
     def unload_scripts(self):
         for s in self.scripts[:]:
@@ -663,26 +672,29 @@ class FlowMaster(controller.Master):
     def unload_script(self, script_obj):
         try:
             script_obj.unload()
-        except script.ScriptError as e:
+        except script.ScriptException as e:
             self.add_event("Script error:\n" + str(e), "error")
+        script.reloader.unwatch(script_obj)
         self.scripts.remove(script_obj)
 
-    def load_script(self, command):
+    def load_script(self, command, use_reloader=False):
         """
             Loads a script. Returns an error description if something went
             wrong.
         """
         try:
-            s = script.Script(command, self)
-        except script.ScriptError as v:
+            s = script.Script(command, script.ScriptContext(self))
+        except script.ScriptException as v:
             return v.args[0]
+        if use_reloader:
+            script.reloader.watch(s, lambda: self.masterq.put(("script_change", s)))
         self.scripts.append(s)
 
     def _run_single_script_hook(self, script_obj, name, *args, **kwargs):
         if script_obj and not self.pause_scripts:
             try:
                 script_obj.run(name, *args, **kwargs)
-            except script.ScriptError as e:
+            except script.ScriptException as e:
                 self.add_event("Script error:\n" + str(e), "error")
 
     def run_script_hook(self, name, *args, **kwargs):
@@ -1021,6 +1033,38 @@ class FlowMaster(controller.Master):
     def handle_accept_intercept(self, f):
         self.state.update_flow(f)
 
+    def handle_script_change(self, s):
+        """
+        Handle a script whose contents have been changed on the file system.
+
+        Args:
+            s (script.Script): the changed script
+
+        Returns:
+            True, if reloading was successful.
+            False, otherwise.
+        """
+        ok = True
+        # We deliberately do not want to fail here.
+        # In the worst case, we have an "empty" script object.
+        try:
+            s.unload()
+        except script.ScriptException as e:
+            ok = False
+            self.add_event('Error reloading "{}": {}'.format(s.filename, str(e)), 'error')
+        try:
+            s.load()
+        except script.ScriptException as e:
+            ok = False
+            self.add_event('Error reloading "{}": {}'.format(s.filename, str(e)), 'error')
+        else:
+            self.add_event('"{}" reloaded.'.format(s.filename), 'info')
+        return ok
+
+    def handle_tcp_message(self, m):
+        self.run_script_hook("tcp_message", m)
+        m.reply()
+
     def shutdown(self):
         self.unload_scripts()
         controller.Master.shutdown(self)
@@ -1036,6 +1080,15 @@ class FlowMaster(controller.Master):
     def stop_stream(self):
         self.stream.fo.close()
         self.stream = None
+
+    def start_stream_to_path(self, path, mode="wb"):
+        path = os.path.expanduser(path)
+        try:
+            f = file(path, mode)
+            self.start_stream(f, None)
+        except IOError as v:
+            return str(v)
+        self.stream_path = path
 
 
 def read_flows_from_paths(paths):
@@ -1058,6 +1111,7 @@ def read_flows_from_paths(paths):
 
 
 class FlowWriter:
+
     def __init__(self, fo):
         self.fo = fo
 
@@ -1067,12 +1121,14 @@ class FlowWriter:
 
 
 class FlowReadError(Exception):
+
     @property
     def strerror(self):
         return self.args[0]
 
 
 class FlowReader:
+
     def __init__(self, fo):
         self.fo = fo
 
@@ -1084,14 +1140,13 @@ class FlowReader:
         try:
             while True:
                 data = tnetstring.load(self.fo)
-                if tuple(data["version"][:2]) != version.IVERSION[:2]:
-                    v = ".".join(str(i) for i in data["version"])
-                    raise FlowReadError(
-                        "Incompatible serialized data version: %s" % v
-                    )
+                try:
+                    data = flow_format_compat.migrate_flow(data)
+                except ValueError as e:
+                    raise FlowReadError(str(e))
                 off = self.fo.tell()
                 yield HTTPFlow.from_state(data)
-        except ValueError as v:
+        except ValueError:
             # Error is due to EOF
             if self.fo.tell() == off and self.fo.read() == '':
                 return
@@ -1099,6 +1154,7 @@ class FlowReader:
 
 
 class FilteredFlowWriter:
+
     def __init__(self, fo, filt):
         self.fo = fo
         self.filt = filt

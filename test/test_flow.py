@@ -10,12 +10,16 @@ import netlib.utils
 from netlib import odict
 from netlib.http import CONTENT_MISSING, Headers
 from libmproxy import filt, controller, tnetstring, flow
-from libmproxy.models import Error, Flow, HTTPRequest, HTTPResponse, HTTPFlow, decoded
+from libmproxy.models import Error
+from libmproxy.models import Flow
+from libmproxy.models import HTTPFlow
+from libmproxy.models import HTTPRequest
+from libmproxy.models import HTTPResponse
 from libmproxy.proxy.config import HostMatcher
 from libmproxy.proxy import ProxyConfig
 from libmproxy.proxy.server import DummyServer
 from libmproxy.models.connections import ClientConnection
-import tutils
+from . import tutils
 
 
 def test_app_registry():
@@ -39,6 +43,7 @@ def test_app_registry():
 
 
 class TestStickyCookieState:
+
     def _response(self, cookie, host):
         s = flow.StickyCookieState(filt.parse(".*"))
         f = tutils.tflow(req=netlib.tutils.treq(host=host, port=80), resp=True)
@@ -72,6 +77,7 @@ class TestStickyCookieState:
 
 
 class TestStickyAuthState:
+
     def test_handle_response(self):
         s = flow.StickyAuthState(filt.parse(".*"))
         f = tutils.tflow(resp=True)
@@ -85,6 +91,7 @@ class TestStickyAuthState:
 
 
 class TestClientPlaybackState:
+
     def test_tick(self):
         first = tutils.tflow()
         s = flow.State()
@@ -118,6 +125,7 @@ class TestClientPlaybackState:
 
 
 class TestServerPlaybackState:
+
     def test_hash(self):
         s = flow.ServerPlaybackState(
             None,
@@ -339,6 +347,7 @@ class TestServerPlaybackState:
 
 
 class TestFlow(object):
+
     def test_copy(self):
         f = tutils.tflow(resp=True)
         a0 = f.get_state()
@@ -488,6 +497,7 @@ class TestFlow(object):
 
 
 class TestState:
+
     def test_backup(self):
         c = flow.State()
         f = tutils.tflow()
@@ -625,6 +635,7 @@ class TestState:
 
 
 class TestSerialize:
+
     def _treader(self):
         sio = StringIO()
         w = flow.FlowWriter(sio)
@@ -712,6 +723,7 @@ class TestSerialize:
 
 
 class TestFlowMaster:
+
     def test_load_script(self):
         s = flow.State()
         fm = flow.FlowMaster(None, s)
@@ -991,6 +1003,7 @@ class TestFlowMaster:
 
 
 class TestRequest:
+
     def test_simple(self):
         f = tutils.tflow()
         r = f.request
@@ -1109,7 +1122,7 @@ class TestRequest:
         r = HTTPRequest.wrap(netlib.tutils.treq())
         r.content = None
         r.headers["content-encoding"] = "identity"
-        assert r.get_decoded_content() == None
+        assert r.get_decoded_content() is None
 
         r.content = "falafel"
         r.encode("gzip")
@@ -1122,6 +1135,7 @@ class TestRequest:
 
 
 class TestResponse:
+
     def test_simple(self):
         f = tutils.tflow(resp=True)
         resp = f.response
@@ -1175,6 +1189,7 @@ class TestResponse:
 
 
 class TestError:
+
     def test_getset_state(self):
         e = Error("Error")
         state = e.get_state()
@@ -1192,6 +1207,7 @@ class TestError:
 
 
 class TestClientConnection:
+
     def test_state(self):
 
         c = tutils.tclient_conn()

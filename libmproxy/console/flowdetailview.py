@@ -9,7 +9,6 @@ def maybe_timestamp(base, attr):
         return utils.format_timestamp_with_milli(getattr(base, attr))
     else:
         return "active"
-    pass
 
 
 def flowdetails(state, flow):
@@ -20,7 +19,7 @@ def flowdetails(state, flow):
     req = flow.request
     resp = flow.response
 
-    if sc:
+    if sc is not None:
         text.append(urwid.Text([("head", "Server Connection:")]))
         parts = [
             ["Address", "%s:%s" % sc.address()],
@@ -76,7 +75,7 @@ def flowdetails(state, flow):
                 common.format_keyvals(parts, key="key", val="text", indent=4)
             )
 
-    if cc:
+    if cc is not None:
         text.append(urwid.Text([("head", "Client Connection:")]))
 
         parts = [

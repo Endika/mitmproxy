@@ -5,12 +5,12 @@ import sys
 
 from construct import ConstructError
 import six
-from netlib.exceptions import InvalidCertificateException, TcpException, TlsException
+from netlib.exceptions import InvalidCertificateException
+from netlib.exceptions import TlsException
 
 from ..contrib.tls._constructs import ClientHello
 from ..exceptions import ProtocolException, TlsProtocolException, ClientHandshakeException
 from .base import Layer
-
 
 
 # taken from https://testssl.sh/openssl-rfc.mappping.html
@@ -222,7 +222,85 @@ def is_tls_record_magic(d):
     )
 
 
+def get_client_hello(client_conn):
+    """
+    Peek into the socket and read all records that contain the initial client hello message.
+
+    client_conn:
+        The :py:class:`client connection <libmproxy.models.ClientConnection>`.
+
+    Returns:
+        The raw handshake packet bytes, without TLS record header(s).
+    """
+    client_hello = ""
+    client_hello_size = 1
+    offset = 0
+    while len(client_hello) < client_hello_size:
+        record_header = client_conn.rfile.peek(offset + 5)[offset:]
+        if not is_tls_record_magic(record_header) or len(record_header) != 5:
+            raise TlsProtocolException('Expected TLS record, got "%s" instead.' % record_header)
+        record_size = struct.unpack("!H", record_header[3:])[0] + 5
+        record_body = client_conn.rfile.peek(offset + record_size)[offset + 5:]
+        if len(record_body) != record_size - 5:
+            raise TlsProtocolException("Unexpected EOF in TLS handshake: %s" % record_body)
+        client_hello += record_body
+        offset += record_size
+        client_hello_size = struct.unpack("!I", '\x00' + client_hello[1:4])[0] + 4
+    return client_hello
+
+
+class TlsClientHello(object):
+
+    def __init__(self, raw_client_hello):
+        self._client_hello = ClientHello.parse(raw_client_hello)
+
+    def raw(self):
+        return self._client_hello
+
+    @property
+    def client_cipher_suites(self):
+        return self._client_hello.cipher_suites.cipher_suites
+
+    @property
+    def client_sni(self):
+        for extension in self._client_hello.extensions:
+            if (extension.type == 0x00 and len(extension.server_names) == 1
+                    and extension.server_names[0].type == 0):
+                return extension.server_names[0].name
+
+    @property
+    def client_alpn_protocols(self):
+        for extension in self._client_hello.extensions:
+            if extension.type == 0x10:
+                return list(extension.alpn_protocols)
+
+    @classmethod
+    def from_client_conn(cls, client_conn):
+        """
+        Peek into the connection, read the initial client hello and parse it to obtain ALPN values.
+        client_conn:
+            The :py:class:`client connection <libmproxy.models.ClientConnection>`.
+        Returns:
+            :py:class:`client hello <libmproxy.protocol.tls.TlsClientHello>`.
+        """
+        try:
+            raw_client_hello = get_client_hello(client_conn)[4:]  # exclude handshake header.
+        except ProtocolException as e:
+            raise TlsProtocolException('Cannot read raw Client Hello: %s' % repr(e))
+
+        try:
+            return cls(raw_client_hello)
+        except ConstructError as e:
+            raise TlsProtocolException('Cannot parse Client Hello: %s, Raw Client Hello: %s' %
+                                       (repr(e), raw_client_hello.encode("hex")))
+
+    def __repr__(self):
+        return "TlsClientHello( sni: %s alpn_protocols: %s,  cipher_suites: %s)" % \
+            (self.client_sni, self.client_alpn_protocols, self.client_cipher_suites)
+
+
 class TlsLayer(Layer):
+
     def __init__(self, ctx, client_tls, server_tls):
         self.client_sni = None
         self.client_alpn_protocols = None
@@ -281,60 +359,17 @@ class TlsLayer(Layer):
         else:
             return "TlsLayer(inactive)"
 
-    def _get_client_hello(self):
-        """
-        Peek into the socket and read all records that contain the initial client hello message.
-
-        Returns:
-            The raw handshake packet bytes, without TLS record header(s).
-        """
-        client_hello = ""
-        client_hello_size = 1
-        offset = 0
-        while len(client_hello) < client_hello_size:
-            record_header = self.client_conn.rfile.peek(offset + 5)[offset:]
-            if not is_tls_record_magic(record_header) or len(record_header) != 5:
-                raise TlsProtocolException('Expected TLS record, got "%s" instead.' % record_header)
-            record_size = struct.unpack("!H", record_header[3:])[0] + 5
-            record_body = self.client_conn.rfile.peek(offset + record_size)[offset + 5:]
-            if len(record_body) != record_size - 5:
-                raise TlsProtocolException("Unexpected EOF in TLS handshake: %s" % record_body)
-            client_hello += record_body
-            offset += record_size
-            client_hello_size = struct.unpack("!I", '\x00' + client_hello[1:4])[0] + 4
-        return client_hello
-
     def _parse_client_hello(self):
         """
         Peek into the connection, read the initial client hello and parse it to obtain ALPN values.
         """
         try:
-            raw_client_hello = self._get_client_hello()[4:]  # exclude handshake header.
-        except ProtocolException as e:
+            parsed = TlsClientHello.from_client_conn(self.client_conn)
+            self.client_sni = parsed.client_sni
+            self.client_alpn_protocols = parsed.client_alpn_protocols
+            self.client_ciphers = parsed.client_cipher_suites
+        except TlsProtocolException as e:
             self.log("Cannot parse Client Hello: %s" % repr(e), "error")
-            return
-
-        try:
-            client_hello = ClientHello.parse(raw_client_hello)
-        except ConstructError as e:
-            self.log("Cannot parse Client Hello: %s" % repr(e), "error")
-            self.log("Raw Client Hello:\r\n:%s" % raw_client_hello.encode("hex"), "debug")
-            return
-
-        self.client_ciphers = client_hello.cipher_suites.cipher_suites
-
-        for extension in client_hello.extensions:
-            if extension.type == 0x00:
-                if len(extension.server_names) != 1 or extension.server_names[0].type != 0:
-                    self.log("Unknown Server Name Indication: %s" % extension.server_names, "error")
-                self.client_sni = extension.server_names[0].name
-            elif extension.type == 0x10:
-                self.client_alpn_protocols = list(extension.alpn_protocols)
-
-        self.log(
-            "Parsed Client Hello: sni=%s, alpn=%s" % (self.client_sni, self.client_alpn_protocols),
-            "debug"
-        )
 
     def connect(self):
         if not self.server_conn:
@@ -379,11 +414,10 @@ class TlsLayer(Layer):
         return choice
 
     def _establish_tls_with_client_and_server(self):
-        self.ctx.connect()
-
         # If establishing TLS with the server fails, we try to establish TLS with the client nonetheless
         # to send an error message over TLS.
         try:
+            self.ctx.connect()
             self._establish_tls_with_server()
         except Exception as e:
             try:
@@ -436,7 +470,7 @@ class TlsLayer(Layer):
                 alpn = [x for x in self.client_alpn_protocols if not deprecated_http2_variant(x)]
             else:
                 alpn = None
-            if alpn and "h2" in alpn and not self.config.http2 :
+            if alpn and "h2" in alpn and not self.config.http2:
                 alpn.remove("h2")
 
             ciphers_server = self.config.ciphers_server
@@ -495,9 +529,20 @@ class TlsLayer(Layer):
         self.log("ALPN selected by server: %s" % self.alpn_for_client_connection, "debug")
 
     def _find_cert(self):
-        host = self.server_conn.address.host
+        """
+        This function determines the Common Name (CN) and Subject Alternative Names (SANs)
+        our certificate should have and then fetches a matching cert from the certstore.
+        """
+        host = None
         sans = set()
-        # Incorporate upstream certificate
+
+        # In normal operation, the server address should always be known at this point.
+        # However, we may just want to establish TLS so that we can send an error message to the client,
+        # in which case the address can be None.
+        if self.server_conn.address:
+            host = self.server_conn.address.host
+
+        # Should we incorporate information from the server certificate?
         use_upstream_cert = (
             self.server_conn and
             self.server_conn.tls_established and
@@ -515,4 +560,5 @@ class TlsLayer(Layer):
         if self._sni_from_server_change:
             sans.add(self._sni_from_server_change)
 
+        sans.discard(host)
         return self.config.certstore.get_cert(host, list(sans))

@@ -1,15 +1,8 @@
-import mock
-import socket
-import os
-import time
-from libmproxy import dump
-from netlib import certutils, tcp
-from libpathod.pathoc import Pathoc
-import tutils
-import tservers
+from . import tutils, tservers
 
 
 class TestApp(tservers.HTTPProxTest):
+
     def test_basic(self):
         assert self.app("/").status_code == 200
 

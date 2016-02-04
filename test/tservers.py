@@ -1,6 +1,5 @@
 import os.path
 import threading
-import shutil
 import tempfile
 import flask
 import mock
@@ -11,7 +10,6 @@ import libpathod.test
 import libpathod.pathoc
 from libmproxy import flow, controller
 from libmproxy.cmdline import APP_HOST, APP_PORT
-import tutils
 
 testapp = flask.Flask(__name__)
 
@@ -31,6 +29,7 @@ def errapp(environ, start_response):
 
 
 class TestMaster(flow.FlowMaster):
+
     def __init__(self, config):
         config.port = 0
         s = ProxyServer(config)
@@ -57,6 +56,7 @@ class TestMaster(flow.FlowMaster):
 
 
 class ProxyThread(threading.Thread):
+
     def __init__(self, tmaster):
         threading.Thread.__init__(self)
         self.tmaster = tmaster
@@ -83,7 +83,6 @@ class ProxTestBase(object):
     # Test Configuration
     ssl = None
     ssloptions = False
-    clientcerts = False
     no_upstream_cert = False
     authenticator = None
     masterclass = TestMaster
@@ -130,11 +129,11 @@ class ProxTestBase(object):
             no_upstream_cert = cls.no_upstream_cert,
             cadir = cls.cadir,
             authenticator = cls.authenticator,
-            clientcerts = tutils.test_data.path("data/clientcert") if cls.clientcerts else None
         )
 
 
 class HTTPProxTest(ProxTestBase):
+
     def pathoc_raw(self):
         return libpathod.pathoc.Pathoc(("127.0.0.1", self.proxy.port), fp=None)
 
@@ -176,11 +175,13 @@ class HTTPProxTest(ProxTestBase):
 
 
 class TResolver:
+
     def __init__(self, port):
         self.port = port
 
     def original_addr(self, sock):
         return ("127.0.0.1", self.port)
+
 
 class TransparentProxTest(ProxTestBase):
     ssl = None
@@ -267,6 +268,7 @@ class ReverseProxTest(ProxTestBase):
 
 
 class SocksModeTest(HTTPProxTest):
+
     @classmethod
     def get_proxy_config(cls):
         d = ProxTestBase.get_proxy_config()
@@ -275,6 +277,7 @@ class SocksModeTest(HTTPProxTest):
 
 
 class ChainProxTest(ProxTestBase):
+
     """
     Chain three instances of mitmproxy in a row to test upstream mode.
     Proxy order is cls.proxy -> cls.chain[0] -> cls.chain[1]

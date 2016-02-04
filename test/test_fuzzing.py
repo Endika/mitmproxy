@@ -1,4 +1,4 @@
-import tservers
+from . import tservers
 
 """
     A collection of errors turned up by fuzzing. Errors are integrated here
@@ -7,6 +7,7 @@ import tservers
 
 
 class TestFuzzy(tservers.HTTPProxTest):
+
     def test_idna_err(self):
         req = r'get:"http://localhost:%s":i10,"\xc6"'
         p = self.pathoc()

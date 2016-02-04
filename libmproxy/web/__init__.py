@@ -2,7 +2,6 @@ from __future__ import absolute_import, print_function
 import collections
 import tornado.ioloop
 import tornado.httpserver
-import os
 from .. import controller, flow
 from . import app
 
@@ -12,6 +11,7 @@ class Stop(Exception):
 
 
 class WebFlowView(flow.FlowView):
+
     def __init__(self, store):
         super(WebFlowView, self).__init__(store, None)
 
@@ -48,6 +48,7 @@ class WebFlowView(flow.FlowView):
 
 
 class WebState(flow.State):
+
     def __init__(self):
         super(WebState, self).__init__()
         self.view._close()
@@ -122,6 +123,7 @@ class Options(object):
 
 
 class WebMaster(flow.FlowMaster):
+
     def __init__(self, server, options):
         self.options = options
         super(WebMaster, self).__init__(server, WebState())
@@ -134,6 +136,16 @@ class WebMaster(flow.FlowMaster):
                     "Could not read flow file: %s" % v,
                     "error"
                 )
+
+        if options.outfile:
+            err = self.start_stream_to_path(
+                options.outfile[0],
+                options.outfile[1]
+            )
+            if err:
+                print >> sys.stderr, "Stream file error:", err
+                sys.exit(1)
+
         if self.options.app:
             self.start_app(self.options.app_host, self.options.app_port)
 

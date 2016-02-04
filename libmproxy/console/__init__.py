@@ -22,6 +22,7 @@ EVENTLOG_SIZE = 500
 
 
 class ConsoleState(flow.State):
+
     def __init__(self):
         flow.State.__init__(self)
         self.focus = None
@@ -105,25 +106,25 @@ class ConsoleState(flow.State):
         for f in self.flows:
             if self.flow_marked(f):
                 marked_flows.append(f)
-                
+
         super(ConsoleState, self).clear()
-        
+
         for f in marked_flows:
             self.add_flow(f)
             self.set_flow_marked(f, True)
-        
+
         if len(self.flows.views) == 0:
             self.focus = None
         else:
             self.focus = 0
         self.set_focus(self.focus)
-        
+
     def flow_marked(self, flow):
         return self.get_flow_setting(flow, "marked", False)
-    
+
     def set_flow_marked(self, flow, marked):
         self.add_flow_setting(flow, "marked", marked)
-        
+
 
 class Options(object):
     attributes = [
@@ -134,6 +135,7 @@ class Options(object):
         "anticomp",
         "client_replay",
         "eventlog",
+        "follow",
         "keepserving",
         "kill",
         "intercept",
@@ -212,6 +214,7 @@ class ConsoleMaster(flow.FlowMaster):
 
         self.eventlog = options.eventlog
         self.eventlist = urwid.SimpleListWalker([])
+        self.follow = options.follow
 
         if options.client_replay:
             self.client_playback_path(options.client_replay)
@@ -247,6 +250,10 @@ class ConsoleMaster(flow.FlowMaster):
     def __setattr__(self, name, value):
         self.__dict__[name] = value
         signals.update_settings.send(self)
+
+    def load_script(self, command, use_reloader=True):
+        # We default to using the reloader in the console ui.
+        super(ConsoleMaster, self).load_script(command, use_reloader)
 
     def sig_add_event(self, sender, e, level):
         needed = dict(error=0, info=1, debug=2).get(level, 1)
@@ -290,15 +297,6 @@ class ConsoleMaster(flow.FlowMaster):
         self.loop.widget = window
         self.loop.draw_screen()
 
-    def start_stream_to_path(self, path, mode="wb"):
-        path = os.path.expanduser(path)
-        try:
-            f = file(path, mode)
-            self.start_stream(f, None)
-        except IOError as v:
-            return str(v)
-        self.stream_path = path
-
     def _run_script_method(self, method, s, f):
         status, val = s.run(method, f)
         if val:
@@ -315,8 +313,8 @@ class ConsoleMaster(flow.FlowMaster):
         signals.add_event("Running script on flow: %s" % command, "debug")
 
         try:
-            s = script.Script(command, self)
-        except script.ScriptError as v:
+            s = script.Script(command, script.ScriptContext(self))
+        except script.ScriptException as v:
             signals.status_message.send(
                 message = "Error loading script."
             )
@@ -571,6 +569,9 @@ class ConsoleMaster(flow.FlowMaster):
         else:
             body = flowlist.FlowListBox(self)
 
+        if self.follow:
+            self.toggle_follow_flows()
+
         signals.push_view_state.send(
             self,
             window = window.Window(
@@ -613,7 +614,7 @@ class ConsoleMaster(flow.FlowMaster):
 
     def save_flows(self, path):
         return self._write_flows(path, self.state.view)
-    
+
     def save_marked_flows(self, path):
         marked_flows = []
         for f in self.state.view:
@@ -706,7 +707,11 @@ class ConsoleMaster(flow.FlowMaster):
                 self.state.intercept) and not f.request.is_replay:
             f.intercept(self)
         else:
-            f.reply()
+            #check if flow was intercepted within an inline script by flow.intercept()
+            if f.intercepted:
+                f.intercept(self)
+            else:
+                f.reply()
         signals.flowlist_change.send(self)
         signals.flow_change.send(self, flow = f)
 
@@ -731,3 +736,9 @@ class ConsoleMaster(flow.FlowMaster):
         if f:
             self.process_flow(f)
         return f
+
+    def handle_script_change(self, script):
+        if super(ConsoleMaster, self).handle_script_change(script):
+            signals.status_message.send(message='"{}" reloaded.'.format(script.filename))
+        else:
+            signals.status_message.send(message='Error reloading "{}".'.format(script.filename))

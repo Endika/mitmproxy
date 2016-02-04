@@ -1,7 +1,7 @@
 import glob
 from libmproxy import utils, script
 from libmproxy.proxy import config
-import tservers
+from . import tservers
 
 
 def test_load_scripts():
@@ -22,7 +22,7 @@ def test_load_scripts():
         if "modify_response_body" in f:
             f += " foo bar"  # two arguments required
         try:
-            s = script.Script(f, tmaster)  # Loads the script file.
+            s = script.Script(f, script.ScriptContext(tmaster))  # Loads the script file.
         except Exception as v:
             if "ImportError" not in str(v):
                 raise

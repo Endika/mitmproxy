@@ -1,15 +1,13 @@
-import socket
 from io import BytesIO
 from netlib.exceptions import HttpSyntaxException
-
 from netlib.http import http1
 from netlib.tcp import TCPClient
 from netlib.tutils import treq, raises
-import tutils
-import tservers
+from . import tutils, tservers
 
 
 class TestHTTPResponse:
+
     def test_read_from_stringio(self):
         s = (
             b"HTTP/1.1 200 OK\r\n"
@@ -36,6 +34,7 @@ class TestHTTPResponse:
 
 
 class TestHTTPFlow(object):
+
     def test_repr(self):
         f = tutils.tflow(resp=True, err=True)
         assert repr(f)
@@ -59,6 +58,7 @@ class TestInvalidRequests(tservers.HTTPProxTest):
 
 
 class TestExpectHeader(tservers.HTTPProxTest):
+
     def test_simple(self):
         client = TCPClient(("127.0.0.1", self.proxy.port))
         client.connect()
@@ -82,3 +82,11 @@ class TestExpectHeader(tservers.HTTPProxTest):
         assert resp.status_code == 200
 
         client.finish()
+
+
+class TestHeadContentLength(tservers.HTTPProxTest):
+
+    def test_head_content_length(self):
+        p = self.pathoc()
+        resp = p.request("""head:'%s/p/200:h"Content-Length"="42"'""" % self.server.urlbase)
+        assert resp.headers["Content-Length"] == "42"

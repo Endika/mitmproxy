@@ -1,7 +1,6 @@
 from __future__ import absolute_import
 import urwid
 
-from netlib import http
 import netlib.utils
 
 from . import common, signals
@@ -16,6 +15,7 @@ def _mkhelp():
         ("C", "clear flow list or eventlog"),
         ("d", "delete flow"),
         ("D", "duplicate flow"),
+        ("E", "export"),
         ("e", "toggle eventlog"),
         ("F", "toggle follow flow list"),
         ("l", "set limit filter pattern"),
@@ -43,6 +43,7 @@ footer = [
 
 
 class EventListBox(urwid.ListBox):
+
     def __init__(self, master):
         self.master = master
         urwid.ListBox.__init__(self, master.eventlist)
@@ -60,6 +61,7 @@ class EventListBox(urwid.ListBox):
 
 
 class BodyPile(urwid.Pile):
+
     def __init__(self, master):
         h = urwid.Text("Event log")
         h = urwid.Padding(h, align="left", width=("relative", 100))
@@ -103,6 +105,7 @@ class BodyPile(urwid.Pile):
 
 
 class ConnectionItem(urwid.WidgetWrap):
+
     def __init__(self, master, state, flow, focus):
         self.master, self.state, self.flow = master, state, flow
         self.f = focus
@@ -254,6 +257,18 @@ class ConnectionItem(urwid.WidgetWrap):
             )
         elif key == "P":
             common.ask_copy_part("a", self.flow, self.master, self.state)
+        elif key == "E":
+            signals.status_prompt_onekey.send(
+                self,
+                prompt = "Export",
+                keys = (
+                    ("as curl command", "c"),
+                    ("as python code", "p"),
+                    ("as raw request", "r"),
+                ),
+                callback = common.export_prompt,
+                args = (self.flow,)
+            )
         elif key == "b":
             common.ask_save_body(None, self.master, self.state, self.flow)
         else:
@@ -261,6 +276,7 @@ class ConnectionItem(urwid.WidgetWrap):
 
 
 class FlowListWalker(urwid.ListWalker):
+
     def __init__(self, master, state):
         self.master, self.state = master, state
         signals.flowlist_change.connect(self.sig_flowlist_change)
@@ -289,6 +305,7 @@ class FlowListWalker(urwid.ListWalker):
 
 
 class FlowListBox(urwid.ListBox):
+
     def __init__(self, master):
         self.master = master
         urwid.ListBox.__init__(

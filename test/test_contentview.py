@@ -4,7 +4,7 @@ import netlib.utils
 from netlib import encoding
 
 import libmproxy.contentviews as cv
-import tutils
+from . import tutils
 
 try:
     import pyamf
@@ -210,6 +210,21 @@ Larry
         assert "decoded gzip" in r[0]
         assert "Raw" in r[0]
 
+    def test_add_cv(self):
+        class TestContentView(cv.View):
+            name = "test"
+            prompt = ("t", "test")
+
+        tcv = TestContentView()
+        cv.add(tcv)
+
+        # repeated addition causes exception
+        tutils.raises(
+            ContentViewException,
+            cv.add,
+            tcv
+        )
+
 
 if pyamf:
     def test_view_amf_request():
@@ -233,7 +248,7 @@ if cv.ViewProtobuf.is_available():
         p = tutils.test_data.path("data/protobuf01")
         content_type, output = v(file(p, "rb").read())
         assert content_type == "Protobuf"
-        assert output[0].text == '1: "3bbc333c-e61c-433b-819a-0b9a8cc103b8"'
+        assert output.next()[0][1] == '1: "3bbc333c-e61c-433b-819a-0b9a8cc103b8"'
 
 
 def test_get_by_shortcut():

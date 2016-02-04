@@ -2,6 +2,7 @@ from __future__ import print_function, absolute_import
 import os
 import signal
 import sys
+import thread
 from netlib.version_check import check_pyopenssl_version, check_mitmproxy_version
 from . import version, cmdline
 from .exceptions import ServerException
@@ -53,6 +54,7 @@ def mitmproxy(args=None):  # pragma: nocover
     console_options.palette = options.palette
     console_options.palette_transparent = options.palette_transparent
     console_options.eventlog = options.eventlog
+    console_options.follow = options.follow
     console_options.intercept = options.intercept
     console_options.limit = options.limit
     console_options.no_mouse = options.no_mouse
@@ -62,7 +64,7 @@ def mitmproxy(args=None):  # pragma: nocover
     m = console.ConsoleMaster(server, console_options)
     try:
         m.run()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, thread.error):
         pass
 
 
@@ -97,7 +99,7 @@ def mitmdump(args=None):  # pragma: nocover
     except dump.DumpError as e:
         print("mitmdump: %s" % e, file=sys.stderr)
         sys.exit(1)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, thread.error):
         pass
 
 
@@ -125,5 +127,5 @@ def mitmweb(args=None):  # pragma: nocover
     m = web.WebMaster(server, web_options)
     try:
         m.run()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, thread.error):
         pass

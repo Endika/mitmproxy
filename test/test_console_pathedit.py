@@ -2,10 +2,11 @@ import os
 from os.path import normpath
 from libmproxy.console import pathedit
 
-import tutils
+from . import tutils
 
 
 class TestPathCompleter:
+
     def test_lookup_construction(self):
         c = pathedit._PathCompleter()
 

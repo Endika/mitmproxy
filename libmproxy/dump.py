@@ -1,6 +1,4 @@
 from __future__ import absolute_import, print_function
-import sys
-import os
 import traceback
 
 import click
@@ -10,7 +8,7 @@ from netlib.http import CONTENT_MISSING
 import netlib.utils
 from . import flow, filt, contentviews
 from .exceptions import ContentViewException
-from .models import HTTPRequest
+
 
 class DumpError(Exception):
     pass
@@ -58,6 +56,7 @@ class Options(object):
 
 
 class DumpMaster(flow.FlowMaster):
+
     def __init__(self, server, options, outfile=None):
         flow.FlowMaster.__init__(self, server, flow.State())
         self.outfile = outfile
@@ -85,12 +84,12 @@ class DumpMaster(flow.FlowMaster):
             self.set_stickyauth(options.stickyauth)
 
         if options.outfile:
-            path = os.path.expanduser(options.outfile[0])
-            try:
-                f = open(path, options.outfile[1])
-                self.start_stream(f, self.filt)
-            except IOError as v:
-                raise DumpError(v.strerror)
+            err = self.start_stream_to_path(
+                options.outfile[0],
+                options.outfile[1]
+            )
+            if err:
+                raise DumpError(err)
 
         if options.replacements:
             for i in options.replacements:
@@ -120,7 +119,7 @@ class DumpMaster(flow.FlowMaster):
 
         scripts = options.scripts or []
         for command in scripts:
-            err = self.load_script(command)
+            err = self.load_script(command, use_reloader=True)
             if err:
                 raise DumpError(err)
 
@@ -150,7 +149,8 @@ class DumpMaster(flow.FlowMaster):
             self.echo(
                 e,
                 fg="red" if level == "error" else None,
-                dim=(level == "debug")
+                dim=(level == "debug"),
+                err=(level == "error")
             )
 
     @staticmethod
@@ -170,7 +170,7 @@ class DumpMaster(flow.FlowMaster):
                 "{}: {}".format(
                     click.style(k, fg="blue", bold=True),
                     click.style(v, fg="blue"))
-                    for k, v in message.headers.fields
+                for k, v in message.headers.fields
             )
             self.echo(headers, indent=4)
         if self.o.flow_detail >= 3:
@@ -236,7 +236,7 @@ class DumpMaster(flow.FlowMaster):
             client = click.style("[replay]", fg="yellow", bold=True)
 
         method = flow.request.method
-        method_color=dict(
+        method_color = dict(
             GET="green",
             DELETE="red"
         ).get(method.upper(), "magenta")

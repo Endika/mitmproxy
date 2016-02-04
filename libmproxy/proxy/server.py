@@ -65,6 +65,7 @@ class ProxyServer(tcp.TCPServer):
 
 
 class ConnectionHandler(object):
+
     def __init__(self, client_conn, client_address, config, channel):
         self.config = config
         """@type: libmproxy.proxy.config.ProxyConfig"""
@@ -130,7 +131,7 @@ class ConnectionHandler(object):
                 )
                 self.log(repr(e), "debug")
             else:
-                self.log(repr(e), "error")
+                self.log(repr(e), "info")
 
                 self.log(traceback.format_exc(), "debug")
             # If an error propagates to the topmost level,

@@ -12,6 +12,7 @@ footer = [
 
 
 class HelpView(urwid.ListBox):
+
     def __init__(self, help_context):
         self.help_context = help_context or []
         urwid.ListBox.__init__(
@@ -31,6 +32,7 @@ class HelpView(urwid.ListBox):
             ("g, G", "go to beginning, end"),
             ("space", "page down"),
             ("pg up/down", "page up/down"),
+            ("ctrl+b/ctrl+f", "page up/down"),
             ("arrows", "up, down, left, right"),
         ]
         text.extend(

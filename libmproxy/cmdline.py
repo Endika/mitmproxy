@@ -372,10 +372,10 @@ def proxy_options(parser):
     rawtcp = group.add_mutually_exclusive_group()
     rawtcp.add_argument("--raw-tcp", action="store_true", dest="rawtcp")
     rawtcp.add_argument("--no-raw-tcp", action="store_false", dest="rawtcp",
-                       help="Explicitly enable/disable experimental raw tcp support. "
-                            "Disabled by default. "
-                            "Default value will change in a future version."
-                       )
+                        help="Explicitly enable/disable experimental raw tcp support. "
+                        "Disabled by default. "
+                        "Default value will change in a future version."
+                        )
 
 
 def proxy_ssl_options(parser):
@@ -407,7 +407,7 @@ def proxy_ssl_options(parser):
     group.add_argument(
         "--client-certs", action="store",
         type=str, dest="clientcerts", default=None,
-        help="Client certificate directory."
+        help="Client certificate file or directory."
     )
     group.add_argument(
         "--no-upstream-cert", default=False,
@@ -667,6 +667,11 @@ def mitmproxy():
         "-e", "--eventlog",
         action="store_true", dest="eventlog",
         help="Show event log."
+    )
+    parser.add_argument(
+        "-f", "--follow",
+        action="store_true", dest="follow",
+        help="Follow flow list."
     )
     parser.add_argument(
         "--no-mouse",

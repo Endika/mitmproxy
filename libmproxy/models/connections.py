@@ -8,6 +8,7 @@ from .. import stateobject, utils
 
 
 class ClientConnection(tcp.BaseHandler, stateobject.StateObject):
+
     def __init__(self, client_connection, address, server):
         # Eventually, this object is restored from state. We don't have a
         # connection then.
@@ -31,10 +32,9 @@ class ClientConnection(tcp.BaseHandler, stateobject.StateObject):
         return bool(self.connection) and not self.finished
 
     def __repr__(self):
-        return "<ClientConnection: {ssl}{host}:{port}>".format(
+        return "<ClientConnection: {ssl}{address}>".format(
             ssl="[ssl] " if self.ssl_established else "",
-            host=self.address.host,
-            port=self.address.port
+            address=repr(self.address)
         )
 
     @property
@@ -89,8 +89,9 @@ class ClientConnection(tcp.BaseHandler, stateobject.StateObject):
 
 
 class ServerConnection(tcp.TCPClient, stateobject.StateObject):
-    def __init__(self, address):
-        tcp.TCPClient.__init__(self, address)
+
+    def __init__(self, address, source_address=None):
+        tcp.TCPClient.__init__(self, address, source_address)
 
         self.via = None
         self.timestamp_start = None
@@ -109,10 +110,9 @@ class ServerConnection(tcp.TCPClient, stateobject.StateObject):
             ssl = "[ssl] "
         else:
             ssl = ""
-        return "<ServerConnection: {ssl}{host}:{port}>".format(
+        return "<ServerConnection: {ssl}{address}>".format(
             ssl=ssl,
-            host=self.address.host,
-            port=self.address.port
+            address=repr(self.address)
         )
 
     @property
@@ -136,7 +136,7 @@ class ServerConnection(tcp.TCPClient, stateobject.StateObject):
         d = super(ServerConnection, self).get_state(short)
         d.update(
             address=({"address": self.address(),
-                     "use_ipv6": self.address.use_ipv6} if self.address else {}),
+                      "use_ipv6": self.address.use_ipv6} if self.address else {}),
             source_address=({"address": self.source_address(),
                              "use_ipv6": self.source_address.use_ipv6} if self.source_address else None),
             cert=self.cert.to_pem() if self.cert else None
@@ -176,11 +176,14 @@ class ServerConnection(tcp.TCPClient, stateobject.StateObject):
     def establish_ssl(self, clientcerts, sni, **kwargs):
         clientcert = None
         if clientcerts:
-            path = os.path.join(
-                clientcerts,
-                self.address.host.encode("idna")) + ".pem"
-            if os.path.exists(path):
-                clientcert = path
+            if os.path.isfile(clientcerts):
+                clientcert = clientcerts
+            else:
+                path = os.path.join(
+                    clientcerts,
+                    self.address.host.encode("idna")) + ".pem"
+                if os.path.exists(path):
+                    clientcert = path
 
         self.convert_to_ssl(cert=clientcert, sni=sni, **kwargs)
         self.sni = sni

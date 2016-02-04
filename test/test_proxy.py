@@ -1,3 +1,4 @@
+import os
 import mock
 from OpenSSL import SSL
 
@@ -7,10 +8,9 @@ from libmproxy.proxy.config import process_proxy_options
 from libmproxy.models.connections import ServerConnection
 from libmproxy.proxy.server import DummyServer, ProxyServer, ConnectionHandler
 from netlib.exceptions import TcpDisconnect
-import tutils
 from libpathod import test
-from netlib import http, tcp
 from netlib.http import http1
+from . import tutils
 
 
 class TestServerConnection(object):
@@ -54,6 +54,7 @@ class TestServerConnection(object):
 
 
 class TestProcessProxyOptions:
+
     def p(self, *args):
         parser = tutils.MockParser()
         cmdline.common_options(parser)
@@ -99,8 +100,11 @@ class TestProcessProxyOptions:
     def test_client_certs(self):
         with tutils.tmpdir() as cadir:
             self.assert_noerr("--client-certs", cadir)
+            self.assert_noerr(
+                "--client-certs",
+                os.path.join(tutils.test_data.path("data/clientcert"), "client.pem"))
             self.assert_err(
-                "directory does not exist",
+                "path does not exist",
                 "--client-certs",
                 "nonexistent")
 
@@ -148,7 +152,8 @@ class TestProcessProxyOptions:
 
 class TestProxyServer:
     # binding to 0.0.0.0:1 works without special permissions on Windows
-    @tutils.SkipWindows
+
+    @tutils.skip_windows
     def test_err(self):
         conf = ProxyConfig(
             port=1
@@ -163,6 +168,7 @@ class TestProxyServer:
 
 
 class TestDummyServer:
+
     def test_simple(self):
         d = DummyServer(None)
         d.start_slave()
@@ -170,6 +176,7 @@ class TestDummyServer:
 
 
 class TestConnectionHandler:
+
     def test_fatal_error(self):
         config = mock.Mock()
         root_layer = mock.Mock()

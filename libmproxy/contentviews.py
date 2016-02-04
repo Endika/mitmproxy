@@ -17,18 +17,16 @@ import json
 import logging
 import subprocess
 import sys
-
 import lxml.html
 import lxml.etree
+import datetime
 from PIL import Image
 from PIL.ExifTags import TAGS
 import html2text
 import six
-
 from netlib.odict import ODict
 from netlib import encoding
 from netlib.utils import clean_bin, hexdump, urldecode, multipartdecode, parse_content_type
-
 from . import utils
 from .exceptions import ContentViewException
 from .contrib import jsbeautifier
@@ -228,7 +226,8 @@ class ViewHTML(View):
             s = lxml.etree.tostring(
                 d,
                 pretty_print=True,
-                doctype=docinfo.doctype
+                doctype=docinfo.doctype,
+                encoding='utf8'
             )
             return "HTML", format_text(s)
 
@@ -277,13 +276,13 @@ class ViewMultipart(View):
 
 if pyamf:
     class DummyObject(dict):
+
         def __init__(self, alias):
             dict.__init__(self)
 
         def __readamf__(self, input):
             data = input.readObject()
             self["data"] = data
-
 
     def pyamf_class_loader(s):
         for i in pyamf.CLASS_LOADERS:
@@ -293,9 +292,7 @@ if pyamf:
                     return v
         return DummyObject
 
-
     pyamf.register_class_loader(pyamf_class_loader)
-
 
     class ViewAMF(View):
         name = "AMF"
@@ -319,6 +316,8 @@ if pyamf:
                 return b
             elif isinstance(b, list):
                 return [self.unpack(i) for i in b]
+            elif isinstance(b, datetime.datetime):
+                return str(b)
             elif isinstance(b, flex.ArrayCollection):
                 return [self.unpack(i, seen) for i in b]
             else:
@@ -419,6 +418,7 @@ class ViewImage(View):
 
 
 class ViewProtobuf(View):
+
     """Human friendly view of protocol buffers
     The view uses the protoc compiler to decode the binary
     """
@@ -479,34 +479,15 @@ class ViewWBXML(View):
             return None
 
 
-views = [
-    ViewAuto(),
-    ViewRaw(),
-    ViewHex(),
-    ViewJSON(),
-    ViewXML(),
-    ViewWBXML(),
-    ViewHTML(),
-    ViewHTMLOutline(),
-    ViewJavaScript(),
-    ViewCSS(),
-    ViewURLEncoded(),
-    ViewMultipart(),
-    ViewImage(),
-]
-if pyamf:
-    views.append(ViewAMF())
-
-if ViewProtobuf.is_available():
-    views.append(ViewProtobuf())
-
+views = []
 content_types_map = {}
-for i in views:
-    for ct in i.content_types:
-        l = content_types_map.setdefault(ct, [])
-        l.append(i)
+view_prompts = []
 
-view_prompts = [i.prompt for i in views]
+
+def get(name):
+    for i in views:
+        if i.name == name:
+            return i
 
 
 def get_by_shortcut(c):
@@ -515,10 +496,57 @@ def get_by_shortcut(c):
             return i
 
 
-def get(name):
+def add(view):
+    # TODO: auto-select a different name (append an integer?)
     for i in views:
-        if i.name == name:
-            return i
+        if i.name == view.name:
+            raise ContentViewException("Duplicate view: " + view.name)
+
+    # TODO: the UI should auto-prompt for a replacement shortcut
+    for prompt in view_prompts:
+        if prompt[1] == view.prompt[1]:
+            raise ContentViewException("Duplicate view shortcut: " + view.prompt[1])
+
+    views.append(view)
+
+    for ct in view.content_types:
+        l = content_types_map.setdefault(ct, [])
+        l.append(view)
+
+    view_prompts.append(view.prompt)
+
+
+def remove(view):
+    for ct in view.content_types:
+        l = content_types_map.setdefault(ct, [])
+        l.remove(view)
+
+        if not len(l):
+            del content_types_map[ct]
+
+    view_prompts.remove(view.prompt)
+    views.remove(view)
+
+
+add(ViewAuto())
+add(ViewRaw())
+add(ViewHex())
+add(ViewJSON())
+add(ViewXML())
+add(ViewWBXML())
+add(ViewHTML())
+add(ViewHTMLOutline())
+add(ViewJavaScript())
+add(ViewCSS())
+add(ViewURLEncoded())
+add(ViewMultipart())
+add(ViewImage())
+
+if pyamf:
+    add(ViewAMF())
+
+if ViewProtobuf.is_available():
+    add(ViewProtobuf())
 
 
 def safe_to_print(lines, encoding="utf8"):

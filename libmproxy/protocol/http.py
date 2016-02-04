@@ -1,12 +1,11 @@
 from __future__ import (absolute_import, print_function, division)
-import itertools
 import sys
 import traceback
 
 import six
 
 from netlib import tcp
-from netlib.exceptions import HttpException, HttpReadDisconnect, TcpException
+from netlib.exceptions import HttpException, HttpReadDisconnect, NetlibException
 from netlib.http import http1, Headers
 from netlib.http import CONTENT_MISSING
 from netlib.tcp import Address
@@ -54,7 +53,7 @@ class _StreamingHttpLayer(_HttpLayer):
 
     def read_response(self, request):
         response = self.read_response_headers()
-        response.content = b"".join(
+        response.data.content = b"".join(
             self.read_response_body(request, response)
         )
         return response
@@ -73,6 +72,7 @@ class _StreamingHttpLayer(_HttpLayer):
 
 
 class Http1Layer(_StreamingHttpLayer):
+
     def __init__(self, ctx, mode):
         super(Http1Layer, self).__init__(ctx)
         self.mode = mode
@@ -133,6 +133,7 @@ class Http1Layer(_StreamingHttpLayer):
 
 # TODO: The HTTP2 layer is missing multiplexing, which requires a major rewrite.
 class Http2Layer(_HttpLayer):
+
     def __init__(self, ctx, mode):
         super(Http2Layer, self).__init__(ctx)
         self.mode = mode
@@ -230,6 +231,7 @@ class Http2Layer(_HttpLayer):
 
 
 class ConnectServerConnection(object):
+
     """
     "Fake" ServerConnection to represent state after a CONNECT request to an upstream proxy.
     """
@@ -250,6 +252,7 @@ class ConnectServerConnection(object):
 
 
 class UpstreamConnectLayer(Layer):
+
     def __init__(self, ctx, connect_request):
         super(UpstreamConnectLayer, self).__init__(ctx)
         self.connect_request = connect_request
@@ -294,6 +297,7 @@ class UpstreamConnectLayer(Layer):
 
 
 class HttpLayer(Layer):
+
     def __init__(self, ctx, mode):
         super(HttpLayer, self).__init__(ctx)
         self.mode = mode
@@ -310,27 +314,30 @@ class HttpLayer(Layer):
                 self.log("request", "debug", [repr(request)])
 
                 # Handle Proxy Authentication
-                if not self.authenticate(request):
+                # Proxy Authentication conceptually does not work in transparent mode.
+                # We catch this misconfiguration on startup. Here, we sort out requests
+                # after a successful CONNECT request (which do not need to be validated anymore)
+                if self.mode != "transparent" and not self.authenticate(request):
                     return
 
                 # Make sure that the incoming request matches our expectations
                 self.validate_request(request)
-
-            except HttpReadDisconnect:
-                # don't throw an error for disconnects that happen before/between requests.
-                return
-            except (HttpException, TcpException) as e:
-                self.send_error_response(400, repr(e))
-                six.reraise(ProtocolException, ProtocolException("Error in HTTP connection: %s" % repr(e)), sys.exc_info()[2])
-
-            try:
-                flow = HTTPFlow(self.client_conn, self.server_conn, live=self)
 
                 # Regular Proxy Mode: Handle CONNECT
                 if self.mode == "regular" and request.form_in == "authority":
                     self.handle_regular_mode_connect(request)
                     return
 
+            except HttpReadDisconnect:
+                # don't throw an error for disconnects that happen before/between requests.
+                return
+            except NetlibException as e:
+                self.send_error_response(400, repr(e))
+                six.reraise(ProtocolException, ProtocolException(
+                    "Error in HTTP connection: %s" % repr(e)), sys.exc_info()[2])
+
+            try:
+                flow = HTTPFlow(self.client_conn, self.server_conn, live=self)
                 flow.request = request
                 self.process_request_hook(flow)
 
@@ -366,7 +373,7 @@ class HttpLayer(Layer):
                     self.handle_upstream_mode_connect(flow.request.copy())
                     return
 
-            except (HttpException, TcpException) as e:
+            except (ProtocolException, NetlibException) as e:
                 self.send_error_response(502, repr(e))
 
                 if not flow.response:
@@ -375,7 +382,8 @@ class HttpLayer(Layer):
                     self.log(traceback.format_exc(), "debug")
                     return
                 else:
-                    six.reraise(ProtocolException, ProtocolException("Error in HTTP connection: %s" % repr(e)), sys.exc_info()[2])
+                    six.reraise(ProtocolException, ProtocolException(
+                        "Error in HTTP connection: %s" % repr(e)), sys.exc_info()[2])
             finally:
                 flow.live = False
 
@@ -392,7 +400,7 @@ class HttpLayer(Layer):
         try:
             response = make_error_response(code, message)
             self.send_response(response)
-        except TcpException:
+        except NetlibException:
             pass
 
     def change_upstream_proxy_server(self, address):
@@ -440,7 +448,7 @@ class HttpLayer(Layer):
 
         try:
             get_response()
-        except (TcpException, HttpException) as v:
+        except NetlibException as v:
             self.log(
                 "server communication error: %s" % repr(v),
                 level="debug"
@@ -468,9 +476,9 @@ class HttpLayer(Layer):
 
         if self.supports_streaming:
             if flow.response.stream:
-                flow.response.content = CONTENT_MISSING
+                flow.response.data.content = CONTENT_MISSING
             else:
-                flow.response.content = b"".join(self.read_response_body(
+                flow.response.data.content = b"".join(self.read_response_body(
                     flow.request,
                     flow.response
                 ))

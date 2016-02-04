@@ -13,27 +13,29 @@ with open(os.path.join(here, 'README.rst'), encoding='utf-8') as f:
     long_description = f.read()
 
 # Core dependencies
+# Do not use the "~=" compatible release specifier.
+# This will break `pip install` on systems with old setuptools versions.
 deps = {
     "netlib>=%s, <%s" % (version.MINORVERSION, version.NEXT_MINORVERSION),
-    "pyasn1>0.1.2",
-    "tornado>=4.0.2",
-    "configargparse>=0.9.3",
-    "pyperclip>=1.5.8",
-    "blinker>=1.3",
-    "pyparsing>=1.5.2",
-    "html2text>=2015.4.14",
-    "construct>=2.5.2",
-    "six>=1.9.0",
-    "lxml>=3.3.6",
-    "Pillow>=2.3.0",
+    "tornado>=4.3.0, <4.4",
+    "configargparse>=0.10.0, <0.11",
+    "pyperclip>=1.5.22, <1.6",
+    "blinker>=1.4, <1.5",
+    "pyparsing>=2.0.5, <2.1",
+    "html2text==2015.11.4",
+    "construct>=2.5.2, <2.6",
+    "six>=1.10.0, <1.11",
+    "lxml==3.4.4",  # there are no Windows wheels for newer versions, so we pin this.
+    "Pillow>=3.0.0, <3.2",
+    "watchdog>=0.8.3, <0.9",
 }
 # A script -> additional dependencies dict.
 scripts = {
     "mitmproxy": {
-        "urwid>=1.3",
+        "urwid>=1.3.1, <1.4",
     },
     "mitmdump": {
-        "click>=5.1",
+        "click>=6.2, <6.3",
     },
     "mitmweb": set()
 }
@@ -50,9 +52,9 @@ dev_deps = {
     "sphinxcontrib-documentedlist>=0.2",
 }
 example_deps = {
-    "pytz",
-    "harparser",
-    "beautifulsoup4",
+    "pytz==2015.7",
+    "harparser>=0.2, <0.3",
+    "beautifulsoup4>=4.4.1, <4.5",
 }
 # Add *all* script dependencies to developer dependencies.
 for script_deps in scripts.values():
@@ -68,7 +70,7 @@ for script_deps in scripts.values():
     deps.update(script_deps)
 
 if sys.version_info < (3, 4):
-    example_deps.add("enum34")
+    example_deps.add("enum34>=1.0.4, <1.1")
 
 console_scripts = ["%s = libmproxy.main:%s" % (s, s) for s in scripts.keys()]
 
@@ -107,9 +109,9 @@ setup(
     extras_require={
         'dev': list(dev_deps),
         'contentviews': [
-            "pyamf>=0.6.1",
-            "protobuf>=2.5.0",
-            "cssutils>=1.0"
+            "pyamf>=0.7.2, <0.8",
+            "protobuf>=2.6.1, <2.7",
+            "cssutils>=1.0.1, <1.1"
         ],
         'examples': list(example_deps)
     }

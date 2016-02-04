@@ -3,13 +3,13 @@ import sys
 
 import six
 
-from netlib import tcp
 from ..models import ServerConnection
 from ..exceptions import ProtocolException
 from netlib.exceptions import TcpException
 
 
 class _LayerCodeCompletion(object):
+
     """
     Dummy class that provides type hinting in PyCharm, which simplifies development a lot.
     """
@@ -31,6 +31,7 @@ class _LayerCodeCompletion(object):
 
 
 class Layer(_LayerCodeCompletion):
+
     """
     Base class for all layers. All other protocol layers should inherit from this class.
     """
@@ -91,6 +92,7 @@ class Layer(_LayerCodeCompletion):
 
 
 class ServerConnectionMixin(object):
+
     """
     Mixin that provides a layer with the capabilities to manage a server connection.
     The server address can be passed in the constructor or set by calling :py:meth:`set_server`.
@@ -111,7 +113,7 @@ class ServerConnectionMixin(object):
 
     def __init__(self, server_address=None):
         super(ServerConnectionMixin, self).__init__()
-        self.server_conn = ServerConnection(server_address)
+        self.server_conn = ServerConnection(server_address, (self.config.host, 0))
         self.__check_self_connect()
 
     def __check_self_connect(self):
@@ -157,10 +159,11 @@ class ServerConnectionMixin(object):
         """
         self.log("serverdisconnect", "debug", [repr(self.server_conn.address)])
         address = self.server_conn.address
+        source_address = self.server_conn.source_address
         self.server_conn.finish()
         self.server_conn.close()
         self.channel.tell("serverdisconnect", self.server_conn)
-        self.server_conn = ServerConnection(address)
+        self.server_conn = ServerConnection(address, source_address)
 
     def connect(self):
         """
@@ -189,6 +192,7 @@ class ServerConnectionMixin(object):
 
 
 class Kill(Exception):
+
     """
     Signal that both client and server connection(s) should be killed immediately.
     """

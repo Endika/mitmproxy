@@ -1,12 +1,13 @@
 import cStringIO
-from libmproxy import filt, flow
+from libmproxy import filt
 from libmproxy.protocol import http
 from libmproxy.models import Error
 from netlib.http import Headers
-import tutils
+from . import tutils
 
 
 class TestParsing:
+
     def _dump(self, x):
         c = cStringIO.StringIO()
         x.dump(fp=c)
@@ -75,6 +76,7 @@ class TestParsing:
 
 
 class TestMatching:
+
     def req(self):
         headers = Headers(header="qvalue")
         req = http.HTTPRequest(

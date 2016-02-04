@@ -4,10 +4,10 @@ import urwid
 
 import netlib.utils
 from . import pathedit, signals, common
-from .. import utils
 
 
 class ActionBar(urwid.WidgetWrap):
+
     def __init__(self):
         urwid.WidgetWrap.__init__(self, None)
         self.clear()
@@ -25,6 +25,7 @@ class ActionBar(urwid.WidgetWrap):
     def sig_message(self, sender, message, expire=None):
         w = urwid.Text(message)
         self._w = w
+        self.prompting = False
         if expire:
             def cb(*args):
                 if w == self._w:
@@ -88,6 +89,7 @@ class ActionBar(urwid.WidgetWrap):
 
     def clear(self):
         self._w = urwid.Text("")
+        self.prompting = False
 
     def prompt_done(self):
         self.prompting = False
@@ -107,6 +109,7 @@ class ActionBar(urwid.WidgetWrap):
 
 
 class StatusBar(urwid.WidgetWrap):
+
     def __init__(self, master, helptext):
         self.master, self.helptext = master, helptext
         self.ab = ActionBar()

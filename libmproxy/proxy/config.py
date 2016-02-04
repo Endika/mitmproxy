@@ -19,6 +19,7 @@ DEFAULT_CLIENT_CIPHERS = "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA
 
 
 class HostMatcher(object):
+
     def __init__(self, patterns=tuple()):
         self.patterns = list(patterns)
         self.regexes = [re.compile(p, re.IGNORECASE) for p in self.patterns]
@@ -41,6 +42,7 @@ ServerSpec = collections.namedtuple("ServerSpec", "scheme address")
 
 
 class ProxyConfig:
+
     def __init__(
             self,
             host='',
@@ -56,7 +58,7 @@ class ProxyConfig:
             tcp_hosts=tuple(),
             http2=False,
             rawtcp=False,
-            ciphers_client=None,
+            ciphers_client=DEFAULT_CLIENT_CIPHERS,
             ciphers_server=None,
             certs=tuple(),
             ssl_version_client="secure",
@@ -133,13 +135,15 @@ def process_proxy_options(parser, options):
 
     if options.clientcerts:
         options.clientcerts = os.path.expanduser(options.clientcerts)
-        if not os.path.exists(options.clientcerts) or not os.path.isdir(options.clientcerts):
+        if not os.path.exists(options.clientcerts):
             return parser.error(
-                "Client certificate directory does not exist or is not a directory: %s" %
-                options.clientcerts
+                "Client certificate path does not exist: %s" % options.clientcerts
             )
 
     if options.auth_nonanonymous or options.auth_singleuser or options.auth_htpasswd:
+
+        if options.transparent_proxy:
+            return parser.error("Proxy Authentication not supported in transparent mode.")
 
         if options.socks_proxy:
             return parser.error(
